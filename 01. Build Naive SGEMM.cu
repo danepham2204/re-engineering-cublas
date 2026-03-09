@@ -4,6 +4,7 @@
 #include <vector>
 #include <cuda_runtime.h>
 #include <random>
+#include "runner.h"
 
 // achieve 4.2 trillion individual math problems solved every single second.
 // GEMM is fundamental operation in linear algebra and ML, computing the matrix product $C = \alpha.A.B + \beta.C
@@ -26,66 +27,18 @@ __global__ void sgemm_coalesced(const float* __restrict__ A, const float* __rest
     C[row * K + column] = alpha * sum + beta * C[row * K + column];
 }
 
-// Can we format code auto in cu ( can used AI so no need)
-void launch_sgemm(int M, int N, int K, float alpha, float beta) {
-  // Allocate device memory ( GPU)
-  float *d_A, *d_B, *d_C;
-
-  // assign memory to device 
-  cudaMalloc(&d_A, M*N*sizeof(float));
-  cudaMalloc(&d_B, N * K * sizeof(float));
-  cudaMalloc(&d_C, M * K * sizeof(float));
-
-  // Init host matrices 
-  std::vector<float> h_A(M * N);   // A is M rows × N columns
-  std::vector<float> h_B(N * K);   // B is N rows × K columns
-  std::vector<float> h_C(M * K);   // C is M rows × K columns (result)
-
-  // rnadom seed
-  std::mt19937 gen(42);
-  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-  for (auto&val: h_A) val = dist(gen);
-  for (auto&val: h_B) val = dist(gen);
-  for (auto&val: h_C) val = dist(gen);
-
-  // Copy from host to device
-  cudaMemcpy(d_A, h_A.data(), M*N*sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_B, h_B.data(), N * K * sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_C, h_C.data(), M * K * sizeof(float), cudaMemcpyHostToDevice);
-
-  // Define block and grid
-  // fixed size of block
-  // block_size= 32
-  // block = 32 x 32 = 1024,1,1
-  // grid = ceil(K/block), ceil(M/block)
-    dim3 blockDim(BLOCK_SIZE * BLOCK_SIZE);
-    dim3 gridDim((K + BLOCK_SIZE - 1) / BLOCK_SIZE, (M + BLOCK_SIZE - 1) / BLOCK_SIZE);  // 2D grid
-
-    // sgemm calculation
-    sgemm_coalesced<<<gridDim, blockDim>>> (d_A, d_B, d_C, M, N, K, alpha, beta);
-    cudaDeviceSynchronize();  // Wait for completion
-
-    // Copy back and verify (optional)
-    cudaMemcpy(h_C.data(), d_C, M * K * sizeof(float), cudaMemcpyDeviceToHost);
-    // ... Add verification logic against CPU GEMM ...
-
-    // Cleanup
-    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
-  
-    std::cout << "\nFirst few elements of result C:\n";
-    for (int i = 0; i < std::min(10, M*K); ++i) {
-        std::cout << h_C[i] << " ";
-        if ((i+1) % 5 == 0) std::cout << "\n";
-    }
-    std::cout << "\n";
+void run_01_naive(const float* d_A, const float* d_B, float* d_C, int M, int N, int K) {
+    dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 gridDim((K + BLOCK_SIZE - 1) / BLOCK_SIZE, (M + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    
+    // float alpha = 1.0f, beta = 0.0f; -> handled implicitly or directly in kernel if needed 
+    // In our runner, we initialize C to 0, so beta=0 is standard.
+    // The kernel itself uses alpha/beta, but let's hardcode 1.0, 0.0 for benchmarking like other kernels
+    sgemm_coalesced<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, 1.0f, 0.0f);
 }
 
 int main() {
-    int M = 1024, N = 1024, K = 1024;  // Example dimensions
-    float alpha = 1.0f, beta = 0.0f;
-    launch_sgemm(M, N, K, alpha, beta);
-    std::cout << "GEMM completed!" << std::endl;
-
-    
+    int M = 2048, N = 2048, K = 2048;
+    run_benchmark(run_01_naive, M, N, K, "01_Naive_SGEMM");
     return 0;
 }

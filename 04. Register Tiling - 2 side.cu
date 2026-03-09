@@ -78,47 +78,17 @@ __global__ void sgemm_register_2d_optimized(
     }
 }
 
-int main() {
-    const int M = 2048, N = 2048, K = 2048; // Increased size for better GFLOPS measurement
+#include "runner.h"
+
+void run_04_register_2d(const float* d_A, const float* d_B, float* d_C, int M, int N, int K) {
     const int TILE_SIZE = 32, REG_M = 4, REG_N = 4;
-
-    float *d_A, *d_B, *d_C;
-    CUDA_CHECK(cudaMalloc(&d_A, M * N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_B, N * K * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_C, M * K * sizeof(float)));
-
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-
     dim3 block(TILE_SIZE / REG_N, TILE_SIZE / REG_M);
     dim3 grid((K + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-
-    // Warmup
     sgemm_register_2d_optimized<TILE_SIZE, REG_M, REG_N><<<grid, block>>>(d_A, d_B, d_C, M, N, K, 1.0f, 0.0f);
-
-    cudaEventRecord(start);
-    for(int i=0; i<10; i++) // Run 10 times for average
-        sgemm_register_2d_optimized<TILE_SIZE, REG_M, REG_N><<<grid, block>>>(d_A, d_B, d_C, M, N, K, 1.0f, 0.0f);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-
-    float ms;
-    cudaEventElapsedTime(&ms, start, stop);
-    ms /= 10.0f; // Average time
-
-    double flops = 2.0 * M * N * K;
-    double gflops = (flops * 1e-9) / (ms * 1e-3);
-
-    std::cout << "Matrix Size: " << M << "x" << N << "x" << K << "\n";
-    std::cout << "Avg Time: " << std::fixed << std::setprecision(3) << ms << " ms\n";
-    std::cout << "Performance: " << std::setprecision(2) << gflops << " GFLOP/s\n";
-
-    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
-    return 0;
 }
 
-// output:
-// Matrix Size: 2048x2048x2048
-// Avg Time: 12.228 ms
-// Performance: 1404.96 GFLOP/s
+int main() {
+    int M = 2048, N = 2048, K = 2048;
+    run_benchmark(run_04_register_2d, M, N, K, "04_Register_Tiling_2_Side");
+    return 0;
+}

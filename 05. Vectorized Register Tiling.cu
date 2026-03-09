@@ -76,55 +76,16 @@ __global__ void sgemm_vectorized_kernel(float* A, float* B, float* C, int M, int
     }
 }
 
-int main() {
-    const int M = 4096, N = 4096, K = 4096;
-    const int sizeA = M * K, sizeB = K * N, sizeC = M * N;
+#include "runner.h"
 
-    std::vector<float> h_A(sizeA), h_B(sizeB), h_C(sizeC, 0.0f);
-    for (int i = 0; i < sizeA; i++) h_A[i] = static_cast<float>(rand()) / RAND_MAX;
-    for (int i = 0; i < sizeB; i++) h_B[i] = static_cast<float>(rand()) / RAND_MAX;
-
-    float *d_A, *d_B, *d_C;
-    CUDA_CHECK(cudaMalloc(&d_A, sizeA * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_B, sizeB * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_C, sizeC * sizeof(float)));
-
-    CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), sizeA * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), sizeB * sizeof(float), cudaMemcpyHostToDevice));
-
+void run_05_vectorized(const float* d_A, const float* d_B, float* d_C, int M, int N, int K) {
     dim3 blockDim(BN / TN, BM / TM);
     dim3 gridDim(N / BN, M / BM);
+    sgemm_vectorized_kernel<<<gridDim, blockDim>>>((float*)d_A, (float*)d_B, d_C, M, N, K);
+}
 
-    sgemm_vectorized_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K);
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-
-    const int RUNS = 20;
-    CUDA_CHECK(cudaEventRecord(start));
-    for (int i = 0; i < RUNS; i++)
-        sgemm_vectorized_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K);
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-
-    float ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-    ms /= RUNS;
-
-    double flops = 2.0 * M * N * K;
-    double gflops = (flops / (ms / 1000.0)) / 1e9;
-
-    std::cout << std::fixed << std::setprecision(2);
-    std::cout << "Matrix size : " << M << "x" << N << "x" << K << "\n";
-    std::cout << "Avg time    : " << ms << " ms\n";
-    std::cout << "Performance : " << gflops << " GFLOPS\n";
-
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+int main() {
+    int M = 2048, N = 2048, K = 2048;
+    run_benchmark(run_05_vectorized, M, N, K, "05_Vectorized_Register_Tiling");
     return 0;
 }

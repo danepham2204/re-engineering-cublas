@@ -167,110 +167,16 @@ __global__ void sgemm_warp_tiled(
     }
 }
 
-std::vector<float> cpu_gemm(
-    const std::vector<float>& h_A,
-    const std::vector<float>& h_B,
-    int M, int N, int K,
-    float alpha, float beta)
-{
-    std::vector<float> h_C(M * K, 0.0f);
-    for (int i = 0; i < M; ++i) {
-        for (int j = 0; j < K; ++j) {
-            float sum = 0.0f;
-            for (int k = 0; k < N; ++k) {
-                sum += h_A[i * N + k] * h_B[k * K + j];
-            }
-            h_C[i * K + j] = alpha * sum + beta * h_C[i * K + j];
-        }
-    }
-    return h_C;
+#include "runner.h"
+
+void run_06_warp_tiled(const float* d_A, const float* d_B, float* d_C, int M, int N, int K) {
+    dim3 block(THREADS_PER_BLOCK);
+    dim3 grid((K + BN - 1) / BN, (M + BM - 1) / BM);
+    sgemm_warp_tiled<<<grid, block>>>(d_A, d_B, d_C, M, N, K, 1.0f, 0.0f);
 }
 
 int main() {
-    constexpr int M = 512;
-    constexpr int N = 512;
-    constexpr int K = 512;
-    constexpr float alpha = 1.0f;
-    constexpr float beta = 0.0f;
-
-    std::vector<float> h_A(M * N);
-    std::vector<float> h_B(N * K);
-    std::vector<float> h_C(M * K, 0.0f);
-
-    std::mt19937 gen(42);
-    std::uniform_real_distribution<float> dist(-0.5f, 0.5f);
-
-    std::generate(h_A.begin(), h_A.end(), [&]() { return dist(gen); });
-    std::generate(h_B.begin(), h_B.end(), [&]() { return dist(gen); });
-
-    float* d_A = nullptr;
-    float* d_B = nullptr;
-    float* d_C = nullptr;
-
-    CUDA_CHECK(cudaMalloc(&d_A, M * N * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_B, N * K * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_C, M * K * sizeof(float)));
-
-    CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), M * N * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), N * K * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), M * K * sizeof(float), cudaMemcpyHostToDevice));
-
-    dim3 block(THREADS_PER_BLOCK);
-    dim3 grid((K + BN - 1) / BN, (M + BM - 1) / BM);
-
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-
-    sgemm_warp_tiled<<<grid, block>>>(d_A, d_B, d_C, M, N, K, alpha, beta);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    constexpr int RUNS = 20;
-    CUDA_CHECK(cudaEventRecord(start));
-    for (int i = 0; i < RUNS; ++i) {
-        sgemm_warp_tiled<<<grid, block>>>(d_A, d_B, d_C, M, N, K, alpha, beta);
-    }
-    CUDA_CHECK(cudaEventRecord(stop));
-    CUDA_CHECK(cudaEventSynchronize(stop));
-
-    float ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-    ms /= RUNS;
-
-    CUDA_CHECK(cudaMemcpy(h_C.data(), d_C, M * K * sizeof(float), cudaMemcpyDeviceToHost));
-
-    std::cout << "Kernel 6: Warp Tiling\n";
-    std::cout << "Block tile: " << BM << "x" << BN << "x" << BK << "\n";
-    std::cout << "Warp tile : " << WM << "x" << WN << "\n";
-    std::cout << "Thread tile: " << TM << "x" << TN << "\n";
-    std::cout << "Matrix: " << M << "x" << N << "x" << K << "\n";
-
-    const double flops = 2.0 * static_cast<double>(M) * N * K;
-    const double gflops = flops / (ms / 1000.0) / 1e9;
-    std::cout << "Avg time: " << std::fixed << std::setprecision(3) << ms << " ms\n";
-    std::cout << "Performance: " << std::setprecision(2) << gflops << " GFLOP/s\n";
-
-    std::cout << "Computing CPU reference...\n";
-    auto h_C_ref = cpu_gemm(h_A, h_B, M, N, K, alpha, beta);
-
-    float max_err = 0.0f;
-    bool ok = true;
-    for (size_t i = 0; i < h_C.size(); ++i) {
-        const float err = std::abs(h_C[i] - h_C_ref[i]);
-        max_err = std::max(max_err, err);
-        if (err > 1e-4f) {
-            ok = false;
-        }
-    }
-
-    std::cout << "Correct: " << (ok ? "YES" : "NO")
-              << " (max abs error = " << max_err << ")\n";
-
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-    CUDA_CHECK(cudaFree(d_A));
-    CUDA_CHECK(cudaFree(d_B));
-    CUDA_CHECK(cudaFree(d_C));
+    int M = 2048, N = 2048, K = 2048;
+    run_benchmark(run_06_warp_tiled, M, N, K, "06_Warp_Tiling");
     return 0;
 }
