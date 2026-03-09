@@ -10,6 +10,8 @@
 // GEMM is fundamental operation in linear algebra and ML, computing the matrix product $C = \alpha.A.B + \beta.C
 // where A= MxN, B = NxK, C is a MxK matrix.
 
+// CUDA_CHECK already applied in runner.h and runner_half.h
+
 constexpr uint BLOCK_SIZE = 32;
 
 // tell the compiler A,B,C not overlapped with restrict

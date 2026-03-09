@@ -2,8 +2,8 @@
 
 ## 1. System Environment
 * **Platform:** Google Colab
-* **GPU Architecture:** _(To be determined, likely T4 (sm_75) or V100 (sm_70))_
-* **CUDA Version:** _(To be determined)_
+* **GPU Architecture:**  T4 (sm_75) 
+* **CUDA Version:** cuda_12.8.r12.8/compiler.35583870_0
 * **Benchmark Parameters:** M=N=K=2048 (All tests use standard single/half precision parameters against cuBLAS baseline).
 
 ## 2. Performance Tracking
@@ -16,17 +16,22 @@ The following table documents the raw GFLOP/s and execution times of the kernels
 | **03. Register Tiling (1D)** | 16.164 | 1062.82 | 1.83e-04 | ✅ Pass |
 | **04. Register Tiling (2D)** | 12.473 | 1377.36 | 1.83e-04 | ✅ Pass |
 | **05. Vectorized Register Tiling**| 5.199 | 3304.42 | 1.83e-04 | ✅ Pass |
-| **06. Warp Tiling** | - | - | - | ⏳ Pending |
-| **07. Tensor Cores (WMMA)** | - | - | - | ⏳ Pending |
-| **08. Tensor Cores SMEM WMMA** | - | - | - | ⏳ Pending |
-| **09. Async Pipeline WMMA** | - | - | - | ⏳ Pending |
+| **06. Warp Tiling** | 13.326 | 1289.19 | 1.83e-04 | ✅ Pass |
+| **07. Tensor Cores (WMMA)** | 7.780 | 2208.25 | 0.00e+00 | ✅ Pass |
+| **08. Tensor Cores SMEM WMMA** | 7.052 | 2436.32 | 0.00e+00 | ✅ Pass |
+| **09. Async Pipeline WMMA** | 6.340 | 2709.72 | 0.00e+00 | ✅ Pass |
 
 ## 3. Bugs and Issues Log
 This section captures math validation failures compared to cuBLAS or compilation errors found during testing.
 
 * **Kernel 01:** No issues. Math behaves as expected.
 * **Kernel 02:** Initial implementation had a high `Max Error` (1.15e+02) due to incorrect bounds checking and indexing when loading Tile B into Shared Memory. The issue was fixed by separating the correctly-bounded transposed element coordinates vs. block local coordinates, leading to a passing math check and a performance bump to ~850 GFLOP/s.
+* **Kernel 07, 08, 09:** Initial compilation failed entirely due to missing the `-arch=sm_75` NVCC compiler flag, making the compiler default to SM52, which wiped out all `nvcuda::wmma` operations. After fixing compilation, the kernel reported high `Max Error` (7.76e+01) and incorrect results. This was diagnosed as a race condition caused by assigning a thread-local uninitialized tracking array `float tmp[WMMA_M * WMMA_N]` to `wmma::store_matrix_sync`. Since WMMA is warp-synchronous, all 32 threads simultaneously tried to overwrite the same thread-local pointer, producing garbage computations. This was solved by directly feeding global/shared memory pointers (`C` and `sC`) to the `store` fragment correctly.
 
 ## 4. Architectural Bottleneck Summary
-_(This section will be populated once all 9 kernels are run to compare memory bandwidth and arithmetic intensity)._
+### The Tensor Core Memory Wall (Tesla T4)
+The highest performing FP32 kernel (Vectorized Register Tiling) achieved **~3.3 TFLOP/s**, nearing the Tesla T4's theoretical FP32 peak of 8.1 TFLOP/s. 
 
+However, the Tensor Core (FP16) kernels peaked at **~2.7 TFLOP/s**, despite the T4 having a theoretical FP16 Tensor Core peak of **65 TFLOP/s**. This is an expected artifact of the memory wall. 
+
+In Kernels 07-09, thread blocks load standard `__half` elements individually from global memory into shared memory. The Tesla T4 is severely constrained by its 320 GB/s global memory bandwidth. To unleash the true 65 TFLOP/s potential of the hardware, the kernels must fully saturate the memory bus utilizing **vectorized 128-bit memory accesses** (`float4` or `int4` casted to multiple `__half` elements) to drastically reduce the number of memory transactions issued per warp. Furthermore, modern Hopper scaling relies natively on asynchronous TMA (Tensor Memory Accelerator) rather than the synchronous `wmma` pipeline demonstrated here.

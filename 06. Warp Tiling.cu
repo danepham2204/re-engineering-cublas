@@ -39,15 +39,6 @@
 #include <iomanip>
 #include <cmath>
 
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        std::cerr << "CUDA error: " << cudaGetErrorString(err) \
-                  << " (" << err << ") at " << __FILE__ << ":" << __LINE__ << "\n"; \
-        exit(1); \
-    } \
-} while (0)
-
 // Kernel 6 - Warp Tiling
 // One block computes a 64x64 tile of C.
 // The block is split into 8 warps, and each warp computes one 32x16 tile.

@@ -21,14 +21,7 @@
 #include <random>
 #include <vector>
 
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        std::cerr << "CUDA error: " << cudaGetErrorString(err) \
-                  << " (" << err << ") at " << __FILE__ << ":" << __LINE__ << "\n"; \
-        exit(1); \
-    } \
-} while (0)
+
 
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
@@ -57,8 +50,8 @@ __device__ void load_stage_tiles(
         const int col = idx % WMMA_K;
         const int g_row = blockIdx.y * BLOCK_TILE_M + row;
         const int g_col = k0 + col;
-        sA[stage][row][col] = (g_row < M && g_col < N)
-            ? A[g_row * N + g_col]
+        sA[stage][row][col] = (g_row < M && g_col < K)
+            ? A[g_row * K + g_col]
             : __float2half(0.0f);
     }
 
@@ -67,8 +60,8 @@ __device__ void load_stage_tiles(
         const int col = idx % BLOCK_TILE_N;
         const int g_row = k0 + row;
         const int g_col = blockIdx.x * BLOCK_TILE_N + col;
-        sB[stage][row][col] = (g_row < N && g_col < K)
-            ? B[g_row * K + g_col]
+        sB[stage][row][col] = (g_row < K && g_col < N)
+            ? B[g_row * N + g_col]
             : __float2half(0.0f);
     }
 }
@@ -80,7 +73,7 @@ __global__ void sgemm_tensor_core_pipeline_epilogue(
     int M, int N, int K,
     float alpha, float beta)
 {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
+
     __shared__ __half sA[2][BLOCK_TILE_M][WMMA_K];
     __shared__ __half sB[2][WMMA_K][BLOCK_TILE_N];
     __shared__ float sC[BLOCK_TILE_M][BLOCK_TILE_N];
@@ -104,15 +97,15 @@ __global__ void sgemm_tensor_core_pipeline_epilogue(
     __syncthreads();
 
     int read_stage = 0;
-    for (int k0 = 0; k0 < N; k0 += WMMA_K) {
+    for (int k0 = 0; k0 < K; k0 += WMMA_K) {
         const int next_k = k0 + WMMA_K;
         const int write_stage = read_stage ^ 1;
 
-        if (next_k < N) {
+        if (next_k < K) {
             load_stage_tiles(A, B, sA, sB, M, N, K, next_k, tid, write_stage);
         }
 
-        if (c_row < M && c_col < K) {
+        if (c_row < M && c_col < N) {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, nvcuda::wmma::row_major> a_frag;
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, nvcuda::wmma::row_major> b_frag;
 
@@ -128,17 +121,8 @@ __global__ void sgemm_tensor_core_pipeline_epilogue(
         read_stage = write_stage;
     }
 
-    if (c_row < M && c_col < K) {
-        float tmp[WMMA_M * WMMA_N];
-        nvcuda::wmma::store_matrix_sync(tmp, c_frag, WMMA_N, nvcuda::wmma::mem_row_major);
-
-        #pragma unroll
-        for (int i = 0; i < WMMA_M; ++i) {
-            #pragma unroll
-            for (int j = 0; j < WMMA_N; ++j) {
-                sC[warp_m * WMMA_M + i][warp_n * WMMA_N + j] = tmp[i * WMMA_N + j];
-            }
-        }
+    if (c_row < M && c_col < N) {
+        nvcuda::wmma::store_matrix_sync(&sC[warp_m * WMMA_M][warp_n * WMMA_N], c_frag, BLOCK_TILE_N, nvcuda::wmma::mem_row_major);
     }
 
     __syncthreads();
@@ -151,18 +135,17 @@ __global__ void sgemm_tensor_core_pipeline_epilogue(
         const int g_row = block_row + row;
         const int g_col = block_col + col;
 
-        if (g_row < M && g_col < K) {
-            C[g_row * K + g_col] = alpha * sC[row][col] + beta * C[g_row * K + g_col];
+        if (g_row < M && g_col < N) {
+            C[g_row * N + g_col] = alpha * sC[row][col] + beta * C[g_row * N + g_col];
         }
     }
-#endif
 }
 
 #include "/content/runner_half.h"
 
 void run_09_tensor_core_pipeline_epilogue(const __half* d_A, const __half* d_B, float* d_C, int M, int N, int K) {
     dim3 block(THREADS_PER_BLOCK);
-    dim3 grid((K + BLOCK_TILE_N - 1) / BLOCK_TILE_N,
+    dim3 grid((N + BLOCK_TILE_N - 1) / BLOCK_TILE_N,
               (M + BLOCK_TILE_M - 1) / BLOCK_TILE_M);
     sgemm_tensor_core_pipeline_epilogue<<<grid, block>>>(d_A, d_B, d_C, M, N, K, 1.0f, 0.0f);
 }

@@ -23,14 +23,7 @@
 #include <random>
 #include <vector>
 
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        std::cerr << "CUDA error: " << cudaGetErrorString(err) \
-                  << " (" << err << ") at " << __FILE__ << ":" << __LINE__ << "\n"; \
-        exit(1); \
-    } \
-} while (0)
+
 
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
@@ -51,7 +44,7 @@ __global__ void sgemm_tensor_core_smem_wmma(
     int M, int N, int K,
     float alpha, float beta)
 {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
+
     __shared__ __half sA[BLOCK_TILE_M][WMMA_K];
     __shared__ __half sB[WMMA_K][BLOCK_TILE_N];
 
@@ -67,14 +60,14 @@ __global__ void sgemm_tensor_core_smem_wmma(
     nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
     nvcuda::wmma::fill_fragment(c_frag, 0.0f);
 
-    for (int k0 = 0; k0 < N; k0 += WMMA_K) {
+    for (int k0 = 0; k0 < K; k0 += WMMA_K) {
         for (int idx = tid; idx < BLOCK_TILE_M * WMMA_K; idx += THREADS_PER_BLOCK) {
             const int row = idx / WMMA_K;
             const int col = idx % WMMA_K;
             const int g_row = blockIdx.y * BLOCK_TILE_M + row;
             const int g_col = k0 + col;
 
-            sA[row][col] = (g_row < M && g_col < N) ? A[g_row * N + g_col] : __float2half(0.0f);
+            sA[row][col] = (g_row < M && g_col < K) ? A[g_row * K + g_col] : __float2half(0.0f);
         }
 
         for (int idx = tid; idx < WMMA_K * BLOCK_TILE_N; idx += THREADS_PER_BLOCK) {
@@ -83,12 +76,12 @@ __global__ void sgemm_tensor_core_smem_wmma(
             const int g_row = k0 + row;
             const int g_col = blockIdx.x * BLOCK_TILE_N + col;
 
-            sB[row][col] = (g_row < N && g_col < K) ? B[g_row * K + g_col] : __float2half(0.0f);
+            sB[row][col] = (g_row < K && g_col < N) ? B[g_row * N + g_col] : __float2half(0.0f);
         }
 
         __syncthreads();
 
-        if (c_row < M && c_col < K) {
+        if (c_row < M && c_col < N) {
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, nvcuda::wmma::row_major> a_frag;
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, nvcuda::wmma::row_major> b_frag;
 
@@ -103,30 +96,31 @@ __global__ void sgemm_tensor_core_smem_wmma(
         __syncthreads();
     }
 
-    if (c_row < M && c_col < K) {
-        float tmp[WMMA_M * WMMA_N];
-        nvcuda::wmma::store_matrix_sync(tmp, c_frag, WMMA_N, nvcuda::wmma::mem_row_major);
-
+    if (c_row < M && c_col < N) {
         #pragma unroll
-        for (int i = 0; i < WMMA_M; ++i) {
+        for (int i = 0; i < c_frag.num_elements; i++) {
+            c_frag.x[i] = c_frag.x[i] * alpha;
+        }
+
+        if (beta != 0.0f) {
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_orig;
+            nvcuda::wmma::load_matrix_sync(c_orig, C + c_row * N + c_col, N, nvcuda::wmma::mem_row_major);
             #pragma unroll
-            for (int j = 0; j < WMMA_N; ++j) {
-                const int row = c_row + i;
-                const int col = c_col + j;
-                if (row < M && col < K) {
-                    C[row * K + col] = alpha * tmp[i * WMMA_N + j] + beta * C[row * K + col];
-                }
+            for (int i = 0; i < c_frag.num_elements; i++) {
+                c_frag.x[i] = c_frag.x[i] + beta * c_orig.x[i];
             }
         }
+
+        nvcuda::wmma::store_matrix_sync(C + c_row * N + c_col, c_frag, N, nvcuda::wmma::mem_row_major);
     }
-#endif
+
 }
 
 #include "/content/runner_half.h"
 
 void run_08_tensor_core_smem_wmma(const __half* d_A, const __half* d_B, float* d_C, int M, int N, int K) {
     dim3 block(THREADS_PER_BLOCK);
-    dim3 grid((K + BLOCK_TILE_N - 1) / BLOCK_TILE_N,
+    dim3 grid((N + BLOCK_TILE_N - 1) / BLOCK_TILE_N,
               (M + BLOCK_TILE_M - 1) / BLOCK_TILE_M);
     sgemm_tensor_core_smem_wmma<<<grid, block>>>(d_A, d_B, d_C, M, N, K, 1.0f, 0.0f);
 }

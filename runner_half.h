@@ -1,5 +1,8 @@
+%%writefile runner_half.h
+
 #pragma once
 #include <iostream>
+#include <cuComplex.h>
 #include <vector>
 #include <iomanip>
 #include <cmath>
@@ -7,7 +10,11 @@
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
 #include <random>
+// CXontains code for standardized bencharmking code, but specially adapted for Half Precision 
+// or FP16 (float point number ) 
+// Meet ard ware limitation caused cuda calculation through 4x4, not full 32-bit floats like 01-> 06 used
 
+#ifndef CUDA_CHECK
 #define CUDA_CHECK(call) do { \
     cudaError_t err = call; \
     if (err != cudaSuccess) { \
@@ -15,7 +22,9 @@
         exit(1); \
     } \
 } while(0)
+#endif
 
+#ifndef CUBLAS_CHECK
 #define CUBLAS_CHECK(call) do { \
     cublasStatus_t err = call; \
     if (err != CUBLAS_STATUS_SUCCESS) { \
@@ -23,6 +32,7 @@
         exit(1); \
     } \
 } while(0)
+#endif
 
 inline void run_benchmark_half(
     void (*kernel_launcher)(const __half*, const __half*, float*, int, int, int),
