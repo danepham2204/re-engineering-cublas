@@ -8,8 +8,6 @@ The progression covers memory coalescing, shared-memory tiling, register tiling,
 
 The primary academic value of this work is not solely in yielding a fast kernel, but in making visible the relationships between algorithmic decomposition, GPU memory hierarchy, instruction issue behavior, arithmetic intensity, and Tensor Core utilization. It serves as both an optimization case study and a conceptual bridge from classic CUDA core programming to modern Tensor Core pipeline designs.
 
-*This work draws inspiration from performance engineering worklogs, notably Hamza Elshafie's H100 GEMM optimization study, adopting the methodology of analyzing isolated optimization steps and their impacts on hardware bottlenecks.*
-
 ## 1. Problem Statement
 
 The core computation studied in this repository is GEMM:
@@ -137,3 +135,7 @@ To evaluate the progress of kernel optimization systematically, the project empl
 ## 9. Conclusion
 
 This project serves as an architectural study demonstrating that high-performance GEMM is not achieved through a single algorithmic trick, but via a sequence of deliberate, hardware-aligned transformations. By exposing the bottlenecks from naive memory accesses down to asynchronous Tensor Core pipelines, this repository provides clear visibility into the trade-offs that dictate modern high-performance GPU programming.
+
+## 10. Inspiration and Acknowledgement
+
+This work draws inspiration from performance engineering worklogs that treat GEMM optimization as a sequence of isolated structural improvements rather than as a single opaque final kernel. In particular, Hamza Elshafie's H100 GEMM optimization study helped shape the methodological framing of this repository: analyze one optimization at a time, identify the bottleneck it targets, and explain the hardware consequences of each change.
