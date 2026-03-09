@@ -8,7 +8,11 @@ The progression covers memory coalescing, shared-memory tiling, register tiling,
 
 Disclaimer: The primary academic value of this work is not solely in yielding a fast kernel, but in making visible the relationships between algorithmic decomposition, GPU memory hierarchy, instruction issue behavior, arithmetic intensity, and Tensor Core utilization. It serves as both an optimization case study and a conceptual bridge from classic CUDA core programming to modern Tensor Core pipeline designs.
 
-![NVIDIA H100 GPU](img/GPU-NVIDIA-H100-SXM5.png)
+![NVIDIA H100 GPU](img/GPU-NVIDIA-H100-SXM5-with-note.png)
+
+
+![NVIDIA H100 GPU](img/SXM5-design-detail.svg)
+
 
 ## Performance Tracking
 
@@ -25,6 +29,64 @@ The following table documents the raw GFLOP/s and execution times of the kernels
 | **07. Tensor Cores (WMMA)**        | 7.780     | 2208.25               | 0.00e+00           | ✅ Pass |
 | **08. Tensor Cores SMEM WMMA**     | 7.052     | 2436.32               | 0.00e+00           | ✅ Pass |
 | **09. Async Pipeline WMMA**        | 6.340     | 2709.72               | 0.00e+00           | ✅ Pass |
+
+## Development Backlog
+
+### Compilation & Infrastructure — The NVCC Story
+
+One thing that became clear while working on this project is that `nvcc` is not just a compiler — it is a **multi-stage compilation driver** that quietly orchestrates several very different tools. Understanding this unlocked why a missing flag could cause a kernel to silently produce completely wrong results.
+
+When you run `nvcc -O3 -arch=sm_75 -lcublas kernel.cu -o kernel`, here is what actually happens:
+
+**Stage 1 — Split.** NVCC splits the `.cu` file into two worlds. Host code (`main()`, memory allocation, kernel launches) is handed off to your system C++ compiler (clang or gcc). Device code (`__global__`, `__device__` functions) is routed to NVIDIA's own compiler backend. This split is why `#if defined(__CUDA_ARCH__)` guards exist — `__CUDA_ARCH__` is only defined during the device compilation pass, so host-side compilation never tries to process WMMA fragment types it has no concept of.
+
+**Stage 2 — PTX generation.** Device kernels compile to **PTX (Parallel Thread Execution)**, NVIDIA's architecture-neutral virtual assembly. This is where the WMMA API gets lowered:
+```
+nvcuda::wmma::mma_sync(...)   →   wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32
+nvcuda::wmma::load_matrix_sync →  wmma.load.a.sync.aligned.m16n16k16.global.row
+```
+
+**Stage 3 — SASS compilation via `ptxas`.** PTX is translated to **SASS**, the real binary machine instructions the hardware executes. This is where `-arch=sm_75` becomes critical. Without it, `ptxas` defaults to sm_52 (Maxwell), which has no WMMA opcodes. The `#if __CUDA_ARCH__ >= 700` block compiles to nothing, and every benchmark call returns in `0.006 ms` reporting 2.7 PFLOP/s — a mathematically perfect empty kernel. This was the root cause of the ghost performance numbers seen in Kernels 07–09 before the flag was identified.
+
+**Stage 4 — Fatbinary packaging.** The final executable contains both the PTX source (for JIT compilation on future unknown GPUs) and the compiled sm_75 cubin (native code for the T4). At runtime, the CUDA driver picks the right one based on the actual hardware.
+
+This investigation reinforced something important: **compiler flags are not just optimization hints — they are architecture contracts.** Specifying the wrong (or no) architecture doesn't just produce slower code. It produces silently wrong code that passes compilation, runs without error, and reports plausible-looking (but fabricated) performance numbers.
+
+### Performance backlog
+
+After getting all nine kernels running and validated against cuBLAS, a question came up that I couldn't quite shake: **why did our Tensor Core kernels (07–09) top out at ~2.7 TFLOP/s, slower than the pure FP32 vectorized kernel (05) at 3.3 TFLOP/s?**
+
+The T4 has a theoretical FP16 Tensor Core peak of **65 TFLOP/s**. We were using less than 5% of it. The math operations themselves are correct — Max Error is 0 — the hardware is just not getting fed fast enough.
+
+### The Discovery: It Was Never About Compute
+
+Tensor Cores finish a 16×16×16 matrix multiply in 1–2 clock cycles. Then the warp sits completely idle, waiting for the next tile to arrive through the 320 GB/s global memory bus. Meanwhile, Kernel 05 was using `float4` (128-bit) vectorized loads, issuing **8× fewer memory instructions** per tile and saturating the bus much more efficiently — which is why a pure FP32 kernel was beating our FP16 Tensor Core implementation on the same hardware.
+
+This is the classic **memory wall** problem.
+
+### What Was Attempted
+
+**Kernel 10: Vectorized TC Pipeline**  
+I replaced the scalar `__half` loads with `int4` (128-bit) vectorized loads, loading 8 `__half` values per instruction, and vectorized the epilogue writes with `float4`. The result was actually *slightly slower* (2466 vs 2709 GFLOP/s).
+
+The reason: our tiles (`BLOCK_TILE_M=32, BLOCK_TILE_N=64`) are too small. With 256 threads but only 64 int4 loads needed for the A tile, **75% of threads were sitting idle** during each load phase. We reduced instruction count by 8× but also killed warp-level memory parallelism. The GPU memory controller needs many simultaneous outstanding requests to saturate bandwidth — not fewer, serialized ones.
+
+*Vectorization and larger tiles must go together.*
+
+### What's Next
+
+**The real unlock on Turing (T4, SM75) is combining vectorized int4 loads with significantly larger block tiles.** A `128×128` output tile with 16 warps per block would generate enough simultaneous memory transactions to justify the int4 packing and approach true memory bandwidth saturation.
+
+Beyond that, the story continues with newer hardware:
+
+- **SM80 (Ampere / A100):** `cp.async` enables hardware-async Global→Shared transfers, decoupling memory loads from the warp scheduler entirely. The warp doesn't stall; it issues a load and moves on to compute. This is the architecture that finally breaks the memory wall for Tensor Core kernels.
+
+- **SM90 (Hopper / H100):** The **Tensor Memory Accelerator (TMA)** is a dedicated, physical DMA engine that bulk-copies tiles from global to shared memory autonomously. Combined with `wgmma` (Warp Group MMA, which has 4 warps cooperate on a single MMA), this is how H100 reaches 80+ TFLOP/s of sustained throughput — not just theoretical peak.
+
+The next kernels in this series would be:
+- **Kernel 11:** 128×128 tiles with `int4` vectorized loads (T4 compatible, closing the memory wall)
+- **Kernel 12:** `cp.async` pipeline (Ampere+), true hardware-async prefetch
+- **Kernel 13:** TMA + WGMMA (Hopper only) — the foundation of modern FlashAttention and cuBLAS internals
 
 ## 1. Problem Statement
 
