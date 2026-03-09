@@ -8,6 +8,21 @@ The progression covers memory coalescing, shared-memory tiling, register tiling,
 
 The primary academic value of this work is not solely in yielding a fast kernel, but in making visible the relationships between algorithmic decomposition, GPU memory hierarchy, instruction issue behavior, arithmetic intensity, and Tensor Core utilization. It serves as both an optimization case study and a conceptual bridge from classic CUDA core programming to modern Tensor Core pipeline designs.
 
+## Performance Tracking
+The following table documents the raw GFLOP/s and execution times of the kernels benchmarking a matrix of $2048 \times 2048 \times 2048$.
+
+| Kernel | Time (ms) | Performance (GFLOP/s) | Max Absolute Error | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **01. Naive SGEMM** | 36.896 | 465.63 | 1.83e-04 | ✅ Pass |
+| **02. Shared Memory Tiling** | 20.195 | 850.68 | 1.83e-04 | ✅ Pass |
+| **03. Register Tiling (1D)** | 16.164 | 1062.82 | 1.83e-04 | ✅ Pass |
+| **04. Register Tiling (2D)** | 12.473 | 1377.36 | 1.83e-04 | ✅ Pass |
+| **05. Vectorized Register Tiling**| 5.199 | 3304.42 | 1.83e-04 | ✅ Pass |
+| **06. Warp Tiling** | 13.326 | 1289.19 | 1.83e-04 | ✅ Pass |
+| **07. Tensor Cores (WMMA)** | 7.780 | 2208.25 | 0.00e+00 | ✅ Pass |
+| **08. Tensor Cores SMEM WMMA** | 7.052 | 2436.32 | 0.00e+00 | ✅ Pass |
+| **09. Async Pipeline WMMA** | 6.340 | 2709.72 | 0.00e+00 | ✅ Pass |
+
 ## 1. Problem Statement
 
 The core computation studied in this repository is GEMM:
