@@ -1,323 +1,139 @@
-# Rebuilding cuBLAS: CUDA GEMM Kernel Optimization from Naive SGEMM to Tensor Cores
+# Rebuilding cuBLAS: A Stepwise Study of CUDA GEMM Optimization
 
-This project documents a hands-on journey of optimizing GEMM on NVIDIA GPUs, starting from a naive SGEMM kernel and progressively introducing the techniques used in high-performance matrix multiplication kernels:
+## Abstract
 
-- global-memory coalescing
-- shared-memory tiling
-- register tiling
-- vectorized loads/stores
-- warp tiling
-- Tensor Core WMMA
-- shared-memory staged Tensor Core kernels
-- software pipelining with producer/consumer structure
+This repository studies how a general matrix multiplication (GEMM) kernel naturally evolves from a correct but conceptually naive CUDA implementation into a hardware-aware design that approaches the structure of modern high-performance GEMM libraries. The project is structured as a sequence of kernels, where each iteration introduces a single major optimization targeting the dominant performance bottleneck.
 
-The goal is not only to get a faster kernel. The goal is to understand what each optimization changes, what bottleneck it attacks, what trade-off it introduces, and how modern GEMM kernels evolve toward cuBLAS/CUTLASS-style design.
+The progression covers memory coalescing, shared-memory tiling, register tiling, vectorization, warp tiling, Tensor Core WMMA, shared-memory-staged WMMA, and software pipelining with a producer-consumer structure.
 
-## What Is This?
+The primary academic value of this work is not solely in yielding a fast kernel, but in making visible the relationships between algorithmic decomposition, GPU memory hierarchy, instruction issue behavior, arithmetic intensity, and Tensor Core utilization. It serves as both an optimization case study and a conceptual bridge from classic CUDA core programming to modern Tensor Core pipeline designs.
 
-This folder is a kernel-by-kernel study of GEMM:
+*This work draws inspiration from performance engineering worklogs, notably Hamza Elshafie's H100 GEMM optimization study, adopting the methodology of analyzing isolated optimization steps and their impacts on hardware bottlenecks.*
+
+## 1. Problem Statement
+
+The core computation studied in this repository is GEMM:
 
 `C = alpha * A * B + beta * C`
 
-where:
+Following standard conventions, the matrices are defined as:
+- `A ∈ ℝ^(M × K)`
+- `B ∈ ℝ^(K × N)`
+- `C ∈ ℝ^(M × N)`
 
-- `A` is `MxK` or `MxN` depending on the kernel version and notation used
-- `B` is `KxN` or `NxK`
-- `C` is the output matrix
+The central problem addressed is that a naive GPU implementation of GEMM fails to exploit the memory and execution hierarchies of NVIDIA GPUs. Despite GEMM's extremely high theoretical parallelism, a simple kernel typically suffers from excessive global-memory traffic, poor data reuse, low arithmetic intensity, high load/store instruction overhead, register pressure, insufficient overlap between memory and compute, and underutilization of Tensor Cores. This repository investigates how these inefficiencies can be systematically eliminated through kernel restructuring.
 
-Each numbered file introduces one major optimization step and keeps the code close enough to the previous version that the effect of the new idea is visible.
+## 2. Research Objective
 
-This repository is best read as:
+This project aims to answer the following question:
 
-1. a learning project for CUDA performance engineering
-2. a reproducible optimization ladder from simple to advanced GEMM kernels
-3. a foundation for a future polished open-source CUDA GEMM project
+> **How does a CUDA GEMM kernel need to be transformed, stage by stage, to progress from a correctness-oriented baseline to a structured, high-performance GPU matrix multiplication?**
 
-## What Problem Does It Solve?
+Specifically, the project aims to:
+1. Identify the dominant bottleneck at each optimization stage.
+2. Introduce one isolated structural optimization to mitigate that bottleneck.
+3. Explain the resulting dataflow and execution model.
+4. Analyze the trade-offs introduced by each architectural change.
+5. Construct a logical progression from scalar CUDA core execution to asynchronous Tensor Core pipelines.
 
-Naive matrix multiplication on GPU wastes most of the hardware.
+## 3. Why GEMM Matters
 
-Typical early bottlenecks are:
+GEMM is a foundational kernel in scientific computing, numerical linear algebra, and deep learning. Many complex higher-level operations ultimately reduce to matrix multiplication. Consequently, GEMM is not merely a benchmark, but a central primitive dictating end-to-end performance in compute-bound workloads.
 
-- too many global memory accesses
-- poor data reuse
-- too many scalar memory instructions
-- too much shared-memory traffic
-- register pressure
-- low arithmetic intensity
-- Tensor Cores sitting idle because the data path is not fast enough
+For GPU performance engineering, GEMM is an ideal case study because it exposes the full interaction between thread hierarchy, warp scheduling, global and shared memory bandwidth, register reuse, instruction issue throughput, and specialized hardware units like Tensor Cores.
 
-This project solves those problems step by step by restructuring both:
+## 4. Conceptual Dataflow
 
-- how data moves: global -> shared -> registers -> accumulators
-- how work is partitioned: block -> warp -> thread -> Tensor Core fragment
+At a high level, optimized GEMM kernels progressively transform the dataflow from a direct global-memory computation model into a staged, hierarchical pipeline.
 
-In short, this project teaches how to turn:
-
-- a correct but slow GEMM
-
-into:
-
-- a structured, high-throughput GEMM pipeline that is much closer to production kernels
-
-## Optimization Journey
-
-The current folder follows this progression:
-
-| Version | File                                                                                 | Main Idea                           | Bottleneck It Targets                             |
-| ------- | ------------------------------------------------------------------------------------ | ----------------------------------- | ------------------------------------------------- |
-| 01      | `01. Build Naive SGEMM.cu`                                                           | Baseline SGEMM                      | correctness, basic launch structure               |
-| 02      | `02. Shared Memory Tilling.cu`                                                       | Shared-memory tiling                | repeated global-memory access                     |
-| 03      | `03. Register Tilling - 1 side.cu`                                                   | 1D register tiling                  | low arithmetic intensity                          |
-| 04      | `04. Register Tilling - 2 side - Less register but product same FMA.cu`              | 2D register tiling                  | shared-memory traffic per output                  |
-| 05      | `05. Vectorized Register Tilling.cu`                                                 | `float4` loads/stores               | instruction pressure in load/store path           |
-| 06      | `06. Warp tilling.cu`                                                                | Warp-level tile ownership           | scheduler alignment, register pressure, locality  |
-| 07      | `07. Tensor Cores (Async TMA + WGMMA).cu`                                            | WMMA Tensor Core baseline           | move GEMM compute from CUDA cores to Tensor Cores |
-| 08      | `08. Tensor Cores - Shared Memory WMMA.cu`                                           | shared-memory staged WMMA           | Tensor Core feed path and reuse                   |
-| 09      | `09. Asynchronous Producer–Consumer Pipeline with Epilogue Shared Memory Staging.cu` | software pipeline + staged epilogue | pipeline bubbles, load/compute overlap            |
-
-## Important Scope Note
-
-Versions `07`, `08`, and `09` are currently best understood as educational Tensor Core steps, not final production Hopper kernels.
-
-More specifically:
-
-- `07` uses WMMA as a practical Tensor Core baseline
-- `08` stages Tensor Core operands through shared memory
-- `09` demonstrates the software structure of producer/consumer pipelining
-
-They are useful and real optimization steps, but they are not yet the final form of:
-
-- true Hopper TMA kernels
-- true WGMMA warp-group kernels
-- fully async `cp.async` / TMA pipelines
-- CUTLASS-level epilogue and swizzle design
-
-That means the repository is already strong as a learning/performance project, but there is still meaningful work left before it can honestly claim "cuBLAS-like" engineering depth.
-
-## Why This Project Is Interesting
-
-Most GEMM tutorials stop at one of these points:
-
-- naive CUDA
-- shared memory tiling
-- one Tensor Core example
-
-This project is more ambitious:
-
-- it preserves the full optimization ladder
-- it keeps the kernels as standalone files
-- it lets readers compare design choices version by version
-- it makes performance engineering visible instead of magical
-
-That is exactly what makes it a good GitHub project:
-
-- educational value
-- systems/performance depth
-- clear progression
-- easy-to-demo kernels
-
-## What Has Already Improved
-
-Across the versions, the project progressively improves:
-
-### 1. Memory Reuse
-
-- tile data is reused from shared memory instead of repeatedly fetched from global memory
-- thread-level register tiles reuse loaded operands for multiple outputs
-- warp and block mapping improve locality and data ownership
-
-### 2. Arithmetic Intensity
-
-- each thread computes more than one output
-- more FMA work is done per byte loaded
-- later kernels do more math per scheduling/event overhead
-
-### 3. Instruction Efficiency
-
-- vectorized loads/stores reduce scalar instruction count
-- warp tiling organizes compute closer to the hardware execution model
-- Tensor Core kernels replace scalar FMA loops with WMMA matrix operations
-
-### 4. Pipeline Structure
-
-- later kernels separate data staging from compute more clearly
-- producer/consumer design prepares the project for true async copy pipelines
-- epilogue staging introduces a more realistic writeback path
-
-## Current Gaps
-
-The project is strong, but it is not finished yet. The main missing pieces are:
-
-### 1. Real Benchmarking Discipline
-
-The project still needs a consistent benchmarking framework:
-
-- fixed benchmark sizes
-- warmup runs
-- averaged timings
-- correctness checks for every kernel
-- unified performance reporting
-- optional cuBLAS baseline comparison
-
-### 2. Cleaner Mathematical Consistency
-
-Some kernels use different dimension notation conventions across the series.
-
-To make the repository easier to read, all kernels should eventually be standardized around one convention, ideally:
-
-- `A = MxK`
-- `B = KxN`
-- `C = MxN`
-
-### 3. Stronger Correctness Infrastructure
-
-Every kernel should ideally have:
-
-- CPU reference implementation
-- max absolute error reporting
-- tolerance policy by datatype
-- pass/fail output
-
-This becomes especially important once mixed precision and Tensor Cores are involved.
-
-### 4. Real Hopper-Specific Kernels
-
-If the final goal is to impress as a serious performance project, the biggest missing step is:
-
-- true `cp.async` or TMA-based async loading
-- true WGMMA warp-group implementation
-- proper barrier choreography for async stages
-- a more production-style epilogue
-
-### 5. Better Documentation and Results
-
-The repository should clearly explain:
-
-- what each version optimizes
-- why each change was made
-- what new bottleneck appears after that change
-- measured performance before/after
-
-That is what turns "a folder of CUDA files" into a real public project.
-
-## What Still Needs To Be Done
-
-If the goal is to publish this as a strong GitHub project, here is the most practical finish checklist.
-
-### High Priority
-
-- Standardize matrix dimension notation across all kernels
-- Add correctness validation to every version
-- Add a consistent benchmark harness and output format
-- Create a results table for all kernels on one GPU
-- Add Nsight Compute screenshots or metric summaries
-- Rename some files for consistency and spelling, for example `Tilling` -> `Tiling`
-
-### Medium Priority
-
-- Add one real Ampere/Hopper async copy version
-- Add one true WGMMA/TMA-oriented kernel or annotated skeleton
-- Add a benchmark script that runs all versions sequentially
-- Add one diagram per major optimization step
-- Add notes on register pressure, occupancy, and memory bottlenecks
-
-### Nice To Have
-
-- Add CUTLASS/cuBLAS comparison plots
-- Add support for multiple datatypes such as FP32, FP16, BF16
-- Add command-line build/run workflow outside notebook mode
-- Add PTX/SASS inspection notes for selected kernels
-- Add architecture notes for T4, A100, H100 differences
-
-## Recommended Project Structure
-
-To make this publishable, the folder should eventually grow into something like:
-
-```text
-GEMM-cuda-kernel-optimization/
-├── README.md
-├── kernels/
-│   ├── 01_naive_sgemm.cu
-│   ├── 02_shared_memory_tiling.cu
-│   ├── 03_register_tiling_1d.cu
-│   ├── 04_register_tiling_2d.cu
-│   ├── 05_vectorized_register_tiling.cu
-│   ├── 06_warp_tiling.cu
-│   ├── 07_tensor_core_wmma.cu
-│   ├── 08_tensor_core_smem_wmma.cu
-│   └── 09_pipeline_epilogue_staging.cu
-├── benchmarks/
-│   └── run_all.py
-├── docs/
-│   ├── profiling.md
-│   ├── roofline.md
-│   ├── tensor-cores.md
-│   └── images/
-└── results/
-    └── benchmark_results.csv
+```mermaid
+flowchart LR
+    A[Global Memory A/B] --> B[Shared Memory Tiles]
+    B --> C[Register Fragments]
+    C --> D[Accumulator Registers]
+    D --> E[Shared Memory Epilogue Optionally]
+    E --> F[Global Memory C]
 ```
 
-You do not need to do this immediately, but it is a strong target structure.
+The optimization sequence in this repository systematically improves each data transition:
+- Global memory to shared memory
+- Shared memory to registers
+- Registers to accumulators
+- Accumulators to the final output validation
 
-## Suggested GitHub Positioning
+## 5. Execution Hierarchy
 
-If you want the project to feel impressive, position it as:
+A core principle underlying this project is that an optimized GEMM must align perfectly with the GPU's execution hierarchy.
 
-> A from-scratch CUDA GEMM optimization worklog that rebuilds the path from naive SGEMM to Tensor Core pipelines, explaining not only what gets faster, but why.
+```mermaid
+flowchart TD
+    A[Grid] --> B[Block Tile]
+    B --> C[Warp Tile]
+    C --> D[Thread Tile]
+    D --> E[Tensor Core Fragment]
+```
 
-That framing is strong because it communicates:
+Early kernels operate primarily at the block and thread levels. Subsequent kernels introduce warp-aware tiling and Tensor Core mapping, progressively tuning the work granularity to match the actual hardware scheduling and execution models.
 
-- technical depth
-- educational value
-- systems thinking
-- performance engineering credibility
+## 6. Optimization Roadmap
 
-## Suggested Titles
+| Version | File | Core Optimization | Main Bottleneck Targeted |
+| :--- | :--- | :--- | :--- |
+| **01** | `01. Build Naive SGEMM.cu` | Baseline CUDA SGEMM | Establish correctness and baseline mapping |
+| **02** | `02. Shared Memory Tiling.cu` | Shared-memory tiling | Repeated global-memory accesses |
+| **03** | `03. Register Tiling - 1 side.cu` | 1D register tiling | Low arithmetic intensity |
+| **04** | `04. Register Tiling - 2 side.cu` | 2D register tiling | Excessive shared-memory traffic per output |
+| **05** | `05. Vectorized Register Tiling.cu` | Vectorized loads/stores | Load/store instruction pressure |
+| **06** | `06. Warp Tiling.cu` | Warp tiling | Scheduler alignment, locality, register pressure |
+| **07** | `07. Tensor Cores (Async TMA + WGMMA).cu` | WMMA Tensor Core baseline | Transition compute from scalar FMA to Tensor Cores |
+| **08** | `08. Tensor Cores - Shared Memory WMMA.cu` | Shared-memory staged WMMA | Tensor Core operand reuse and feed efficiency |
+| **09** | `09. Async Producer–Consumer Pipeline.cu` | Software pipelining & epilogue | Pipeline bubbles and load/compute serialization |
 
-Best recommended title:
+## 7. Deep Explanation of Each Stage
 
-**Rebuilding cuBLAS: CUDA GEMM Kernel Optimization from Naive SGEMM to Tensor Cores**
+### 7.1 Version 1: Naive SGEMM
+The baseline kernel maps output elements directly to threads. Each thread computes one output by traversing the entire reduction dimension.
+- **Demonstrates:** The basic GEMM structure and standard grid-to-matrix mapping.
+- **Bottlenecks:** Every thread redundantly fetches from global memory, resulting in negligible arithmetic intensity and massive memory bandwidth bottlenecks.
 
-Other strong options:
+### 7.2 Version 2: Shared-Memory Tiling
+Introduces block-cooperative loading of `A` and `B` tiles into shared memory.
+- **Improvements:** A single tile loaded from global memory is reused across the block, drastically reducing global bandwidth requirements.
+- **New Bottleneck:** Shared-memory traffic scales up; each output still demands repeated shared-memory reads.
 
-- **From Naive SGEMM to Tensor Cores: A CUDA GEMM Optimization Worklog**
-- **CUDA GEMM Optimization Journey: Tiling, Warp Mapping, WMMA, and Pipelining**
-- **How GEMM Gets Fast: Rebuilding High-Performance CUDA Matrix Multiplication**
-- **Inside High-Performance GEMM: A Step-by-Step CUDA Kernel Optimization Project**
+### 7.3 Versions 3 & 4: Register Tiling
+Shifts data reuse deeper into the hierarchy by assigning multiple output elements to each thread (1D, then 2D).
+- **Improvements:** Operands loaded into registers are reused across multiple FMA instructions, increasing arithmetic intensity and reducing shared-memory reads.
+- **Trade-offs:** Higher output per thread increases register pressure, potentially limiting occupancy if untuned.
 
-If you want the most impressive and clickable title, use the first one.
+### 7.4 Version 5: Vectorized Register Tiling
+Targets instruction-level inefficiencies in the memory path.
+- **Improvements:** Vector instructions (e.g., `float4`) fetch multiple elements per issued instruction. This lowers the instruction pressure in the load/store units and improves frontend efficiency independently of memory transaction coalescing.
 
-If you want the most educational and honest title, use the second one.
+### 7.5 Version 6: Warp Tiling
+Introduces warp-level ownership of output sub-tiles, bridging the gap between block-wide sharing and thread-local computation.
+- **Improvements:** Matches the hardware’s true execution unit (the warp), ensuring exceptional scheduler alignment, spatial locality, and a reduction in redundant register usage. This serves as the critical conceptual bridge toward Tensor Cores.
 
-## Suggested README Sections For a Public Repo
+### 7.6 Version 7: Tensor Core WMMA Baseline
+Replaces scalar FMA instructions on CUDA cores with warp-wide matrix multiply-accumulate operations on Tensor Cores.
+- **Improvements:** Unlocks specialized hardware for dense math. The optimization focus officially shifts from organizing scalar arithmetic to efficiently feeding matrix hardware geometry.
 
-When you publish the full project, your top-level README should answer these questions fast:
+### 7.7 Version 8: Shared-Memory Staged WMMA
+Refines the Tensor Core dataflow by staging operands through shared memory rather than relying solely on global memory fragment loads.
+- **Improvements:** Restores operand reuse across warps, vastly improving locality and bringing the dataflow closer to production CUDA capabilities.
 
-1. What is this project?
-2. Why should someone care?
-3. What kernels are included?
-4. What did each optimization improve?
-5. What hardware was used?
-6. How do I run it?
-7. What is still incomplete?
+### 7.8 Version 9: Producer-Consumer Pipeline and Epilogue Staging
+Implements software pipelining and structured shared-memory epilogues.
+- **Improvements:** Overlaps memory fetches (producer) with computation (consumer) to hide latency and eliminate Tensor Core stalls. Staging the epilogue in shared memory allows the output matrix to be efficiently coalesced prior to the final global-memory write.
 
-This file already gives you most of that structure.
+## 8. Experimental Methodology
 
-## A Good Honest Project Summary
+To evaluate the progress of kernel optimization systematically, the project employs the following benchmarking protocol across implementations:
+1. **Fixed Problem Dimensions:** Matrices are evaluated at standardized sizes (e.g., M=N=K=4096) to accurately measure caching effects.
+2. **Warmup & Repeated Execution:** Cold-start anomalies are masked via warmup iterations followed by averaged timing runs.
+3. **Reference Validation:** Maximum absolute error is calculated against a trusted CPU/GPU reference (e.g., cuBLAS) to guarantee mathematical correctness.
+4. **Performance Profiling:** Throughput is reported in GFLOP/s, complemented by key Nsight Compute metrics identifying stall reasons (e.g., Memory Dependency, Execution Dependency) at each stage.
 
-This repository is a learning-first, performance-oriented CUDA GEMM project that walks through the real engineering steps between a basic SGEMM and modern Tensor Core kernels. It is not just about making GEMM faster. It is about understanding the bottleneck at each stage, restructuring the kernel accordingly, and building intuition for how high-performance GPU math actually works.
+## 9. Conclusion
 
-## Final Recommendation
-
-To make this genuinely impressive on GitHub, do these next:
-
-1. Clean up naming and notation.
-2. Add benchmark and correctness consistency across all versions.
-3. Add one polished results table with performance progression.
-4. Be explicit about which Tensor Core kernels are educational approximations versus true Hopper implementations.
-5. Add one final advanced kernel that uses real async-copy/TMA/WGMMA concepts or a carefully labeled architecture-specific skeleton.
-
-If you do that, this stops being just a practice folder and becomes a strong portfolio-quality GPU performance project.
-
-This project is inspired by performance worklogs such as Hamza Elshafie's H100 GEMM optimization write-up, especially the idea of building performance incrementally and explaining what each kernel buys you in practice.
+This project serves as an architectural study demonstrating that high-performance GEMM is not achieved through a single algorithmic trick, but via a sequence of deliberate, hardware-aligned transformations. By exposing the bottlenecks from naive memory accesses down to asynchronous Tensor Core pipelines, this repository provides clear visibility into the trade-offs that dictate modern high-performance GPU programming.
