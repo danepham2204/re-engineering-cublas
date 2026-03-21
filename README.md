@@ -2,23 +2,22 @@
 
 ## The Problem
 
-A correct GEMM kernel is easy to write. A fast one is not — and the gap between the two is not filled by a single clever trick. It is filled by understanding *why* the hardware keeps rejecting your current design.
+A correct GEMM kernel is easy to write. A fast one is not — and the gap between the two is not filled by a single clever trick. It is filled by understanding _why_ the hardware keeps rejecting your current design.
 
-This project starts with a kernel that works but runs at ~465 GFLOP/s on hardware with a 65 TFLOP/s FP16 Tensor Core peak. The distance between those two numbers is the actual subject of this repository. Each kernel in this series identifies the dominant reason the previous one was slow, introduces one targeted structural change to address it, and then asks: *what broke next?*
+This project starts with a kernel that works but runs at ~465 GFLOP/s on hardware with a 65 TFLOP/s FP16 Tensor Core peak. The distance between those two numbers is the actual subject of this repository. Each kernel in this series identifies the dominant reason the previous one was slow, introduces one targeted structural change to address it, and then asks: _what broke next?_
 
 The sequence is not a tour of optimization techniques. It is the output of a specific diagnostic loop applied repeatedly: **profile → identify bottleneck → intervene → re-measure**. The decisions made at each stage — what to tile, what to vectorize, when to move data into shared memory, when to pipeline — are driven by what the hardware exposed, not by a predetermined recipe.
 
-By the end of this series you will have seen memory coalescing, shared-memory tiling, register tiling, vectorized loads, warp-level data ownership, Tensor Core WMMA, shared-memory operand staging, and software pipelining with a producer-consumer structure. The endpoint is not the fastest possible kernel. It is a complete account of *why* each transformation was necessary and what it cost.
+By the end of this series you will have seen memory coalescing, shared-memory tiling, register tiling, vectorized loads, warp-level data ownership, Tensor Core WMMA, shared-memory operand staging, and software pipelining with a producer-consumer structure. The endpoint is not the fastest possible kernel. It is a complete account of _why_ each transformation was necessary and what it cost.
 
 ![NVIDIA H100 GPU](img/GPU-NVIDIA-H100-SXM5-with-note.png)
 
-
-![NVIDIA H100 GPU](img/SXM5-design-detail.svg)
-
+![NVIDIA H100 GPU](img/GPU-architecture.jpg)
 
 Key notes:
-+ Kernels are written from the perspective of a single thread.
-+ All threads in grid running or executing the same kernel function
+
+- Kernels are written from the perspective of a single thread.
+- All threads in grid running or executing the same kernel function
 
 ## Performance Tracking
 
@@ -42,15 +41,16 @@ The following table documents the raw GFLOP/s and execution times of the kernels
 
 One thing that became clear while working on this project is that `nvcc` is not just a compiler — it is a **multi-stage compilation driver** that quietly orchestrates several very different tools. Understanding this unlocked why a missing flag could cause a kernel to silently produce completely wrong results. This stage of compiling through `nvcc` is very important to understand:
 
-+ **Stage 1 — Split.** NVCC splits the `.cu` file into two worlds. Host code (`main()`, memory allocation, kernel launches) is handed off to your system C++ compiler (clang or gcc). Device code (`__global__`, `__device__` functions) is routed to NVIDIA's own compiler backend. This split is why `#if defined(__CUDA_ARCH__)` guards exist — `__CUDA_ARCH__` is only defined during the device compilation pass, so host-side compilation never tries to process WMMA fragment types it has no concept of.
+- **Stage 1 — Split.** NVCC splits the `.cu` file into two worlds. Host code (`main()`, memory allocation, kernel launches) is handed off to your system C++ compiler (clang or gcc). Device code (`__global__`, `__device__` functions) is routed to NVIDIA's own compiler backend. This split is why `#if defined(__CUDA_ARCH__)` guards exist — `__CUDA_ARCH__` is only defined during the device compilation pass, so host-side compilation never tries to process WMMA fragment types it has no concept of.
 
-+ **Stage 2 — PTX generation.** Device kernels compile to **PTX (Parallel Thread Execution)**, NVIDIA's architecture-neutral virtual assembly. This is where the WMMA API gets lowered:
+- **Stage 2 — PTX generation.** Device kernels compile to **PTX (Parallel Thread Execution)**, NVIDIA's architecture-neutral virtual assembly. This is where the WMMA API gets lowered:
+
 ```
 nvcuda::wmma::mma_sync(...)   →   wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32
 nvcuda::wmma::load_matrix_sync →  wmma.load.a.sync.aligned.m16n16k16.global.row
 ```
 
-+ **Stage 3 — SASS compilation via `ptxas`.** PTX is translated to **SASS**, the real binary machine instructions the hardware executes. This is where `-arch=sm_75` becomes critical. Without it, `ptxas` defaults to sm_52 (Maxwell), which has no WMMA opcodes. The `#if __CUDA_ARCH__ >= 700` block compiles to nothing, and every benchmark call returns in `0.006 ms` reporting 2.7 PFLOP/s — a mathematically perfect empty kernel. This was the root cause of the ghost performance numbers seen in Kernels 07–09 before the flag was identified.
+- **Stage 3 — SASS compilation via `ptxas`.** PTX is translated to **SASS**, the real binary machine instructions the hardware executes. This is where `-arch=sm_75` becomes critical. Without it, `ptxas` defaults to sm_52 (Maxwell), which has no WMMA opcodes. The `#if __CUDA_ARCH__ >= 700` block compiles to nothing, and every benchmark call returns in `0.006 ms` reporting 2.7 PFLOP/s — a mathematically perfect empty kernel. This was the root cause of the ghost performance numbers seen in Kernels 07–09 before the flag was identified.
 
 **Stage 4 — Fatbinary packaging.** The final executable contains both the PTX source (for JIT compilation on future unknown GPUs) and the compiled sm_75 cubin (native code for the T4). At runtime, the CUDA driver picks the right one based on the actual hardware.
 
@@ -71,11 +71,11 @@ This is the classic **memory wall** problem.
 ### What Was Attempted
 
 **Kernel 10: Vectorized TC Pipeline**  
-I replaced the scalar `__half` loads with `int4` (128-bit) vectorized loads, loading 8 `__half` values per instruction, and vectorized the epilogue writes with `float4`. The result was actually *slightly slower* (2466 vs 2709 GFLOP/s).
+I replaced the scalar `__half` loads with `int4` (128-bit) vectorized loads, loading 8 `__half` values per instruction, and vectorized the epilogue writes with `float4`. The result was actually _slightly slower_ (2466 vs 2709 GFLOP/s).
 
 The reason: our tiles (`BLOCK_TILE_M=32, BLOCK_TILE_N=64`) are too small. With 256 threads but only 64 int4 loads needed for the A tile, **75% of threads were sitting idle** during each load phase. We reduced instruction count by 8× but also killed warp-level memory parallelism. The GPU memory controller needs many simultaneous outstanding requests to saturate bandwidth — not fewer, serialized ones.
 
-*Vectorization and larger tiles must go together.*
+_Vectorization and larger tiles must go together._
 
 ### What's Next
 
@@ -88,6 +88,7 @@ Beyond that, the story continues with newer hardware:
 - **SM90 (Hopper / H100):** The **Tensor Memory Accelerator (TMA)** is a dedicated, physical DMA engine that bulk-copies tiles from global to shared memory autonomously. Combined with `wgmma` (Warp Group MMA, which has 4 warps cooperate on a single MMA), this is how H100 reaches 80+ TFLOP/s of sustained throughput — not just theoretical peak.
 
 The next kernels in this series would be:
+
 - **Kernel 11:** 128×128 tiles with `int4` vectorized loads (T4 compatible, closing the memory wall)
 - **Kernel 12:** `cp.async` pipeline (Ampere+), true hardware-async prefetch
 - **Kernel 13:** TMA + WGMMA (Hopper only) — the foundation of modern FlashAttention and cuBLAS internals
