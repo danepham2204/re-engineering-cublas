@@ -1,12 +1,14 @@
-# Rebuilding cuBLAS: A Stepwise Study of CUDA GEMM Optimization
+# Rebuilding cuBLAS: From a Naive CUDA Kernel to a Tensor Core Pipeline
 
-## Abstract
+## The Problem
 
-This repository studies how a general matrix multiplication (GEMM) kernel naturally evolves from a correct but conceptually naive CUDA implementation into a hardware-aware design that approaches the structure of modern high-performance GEMM libraries. The project is structured as a sequence of kernels, where each iteration introduces a single major optimization targeting the dominant performance bottleneck.
+A correct GEMM kernel is easy to write. A fast one is not — and the gap between the two is not filled by a single clever trick. It is filled by understanding *why* the hardware keeps rejecting your current design.
 
-The progression covers memory coalescing, shared-memory tiling, register tiling, vectorization, warp tiling, Tensor Core WMMA, shared-memory-staged WMMA, and software pipelining with a producer-consumer structure.
+This project starts with a kernel that works but runs at ~465 GFLOP/s on hardware with a 65 TFLOP/s FP16 Tensor Core peak. The distance between those two numbers is the actual subject of this repository. Each kernel in this series identifies the dominant reason the previous one was slow, introduces one targeted structural change to address it, and then asks: *what broke next?*
 
-Disclaimer: The primary academic value of this work is not solely in yielding a fast kernel, but in making visible the relationships between algorithmic decomposition, GPU memory hierarchy, instruction issue behavior, arithmetic intensity, and Tensor Core utilization. It serves as both an optimization case study and a conceptual bridge from classic CUDA core programming to modern Tensor Core pipeline designs.
+The sequence is not a tour of optimization techniques. It is the output of a specific diagnostic loop applied repeatedly: **profile → identify bottleneck → intervene → re-measure**. The decisions made at each stage — what to tile, what to vectorize, when to move data into shared memory, when to pipeline — are driven by what the hardware exposed, not by a predetermined recipe.
+
+By the end of this series you will have seen memory coalescing, shared-memory tiling, register tiling, vectorized loads, warp-level data ownership, Tensor Core WMMA, shared-memory operand staging, and software pipelining with a producer-consumer structure. The endpoint is not the fastest possible kernel. It is a complete account of *why* each transformation was necessary and what it cost.
 
 ![NVIDIA H100 GPU](img/GPU-NVIDIA-H100-SXM5-with-note.png)
 

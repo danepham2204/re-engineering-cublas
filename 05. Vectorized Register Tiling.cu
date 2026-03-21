@@ -6,14 +6,6 @@
 #include <vector>
 #include <iomanip>
 
-#define CUDA_CHECK(call) {                                                  \
-    cudaError_t err = call;                                                 \
-    if (err != cudaSuccess) {                                               \
-        printf("CUDA Error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
-        exit(1);                                                            \
-    }                                                                       \
-}
-
 const int BM = 128;
 const int BN = 128;
 const int BK = 8;

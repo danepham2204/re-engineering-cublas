@@ -8,13 +8,13 @@
 // Why this matters:
 // In Kernels 07-09, Tensor Cores finish their 16x16x16 MMA in 1-2 cycles, then the
 // entire warp stalls waiting for the next tile to arrive from global memory.
-// Scalar __half loads issue 8x more memory instructions than necessary.
+// Scalar __half loads issue 8x. more memory instructions than necessary.
 // By using int4 loads (128 bits = 8 __half per instruction), we drastically reduce
 // the number of memory transactions and better saturate the T4's 320 GB/s bandwidth.
 //
 // Additionally, the epilogue (shared memory -> global C) is vectorized using float4
 // (128 bits = 4 floats per instruction), further reducing store instruction pressure.
-//
+// 
 // Architecture requirement: SM75+ (Turing Tensor Cores)
 // Compile with: nvcc -O3 -arch=sm_75 -lcublas 10_Vectorized_TC.cu -o 10_vtc
 

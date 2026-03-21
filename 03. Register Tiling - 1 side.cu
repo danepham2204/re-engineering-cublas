@@ -1,6 +1,6 @@
 %%writefile 03_Register_Tiling.cu
 // %%cuda
-#include "content/runner.h"
+#include "/content/runner.h"
 #include <cuda_runtime.h>
 #include <iostream>
 #include <vector>
