@@ -213,7 +213,7 @@ Every thread independently re-fetches data that neighboring threads also need. G
 
 ### Version 02: Shared-Memory Tiling
 
-![SMEM load title calculation](img/SMEM_LOAD_TITLE_CALCULATION.png)
+![SMEM load title calculation](img/smem_load_tile_calculation.png)
 
 **Core idea**
 
