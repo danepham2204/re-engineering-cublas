@@ -6,7 +6,7 @@ A correct GEMM kernel is easy to write. A fast one is not. This repository close
 
 Each kernel version isolates one structural change, explains the bottleneck it targets, and documents what becomes the next limiting factor.
 
-![NVIDIA H100 Architecture](img/GPU-architecture.jpg)
+![NVIDIA Turing Architecture Reference](img/GPU-architecture.jpg)
 
 ---
 
@@ -89,7 +89,9 @@ For GPU performance engineering, GEMM is an ideal case study because it exposes 
 
 The diagrams below serve as architectural reference throughout the optimization story.
 
-![NVIDIA H100 SXM5](img/GPU-NVIDIA-H100-SXM5-with-note.png)
+![NVIDIA Hopper Reference](img/GPU-NVIDIA-H100-SXM5-with-note.png)
+
+*(Note: While these reference diagrams depict newer architectures like H100, this project's quantitative benchmarks were established on the Turing SM75 architecture.)*
 
 Key notes:
 
@@ -147,7 +149,7 @@ Early kernels operate at the block and thread level. Later kernels introduce war
 | **04**  | `04. Register Tiling - 2 side.cu`          | 2D register tiling             | Excessive shared-memory traffic per output       |
 | **05**  | `05. Vectorized Register Tiling.cu`        | Vectorized loads/stores        | Load/store instruction pressure                  |
 | **06**  | `06. Warp Tiling.cu`                       | Warp tiling                    | Scheduler alignment, locality, register pressure |
-| **07**  | `07. Tensor Cores (Async TMA + WGMMA).cu`  | WMMA Tensor Core baseline      | Transition from scalar FMA to Tensor Cores       |
+| **07**  | `07. Tensor Cores Baseline (WMMA).cu`      | WMMA Tensor Core baseline      | Transition from scalar FMA to Tensor Cores       |
 | **08**  | `08. Tensor Cores - Shared Memory WMMA.cu` | Shared-memory staged WMMA      | Tensor Core operand reuse and feed efficiency    |
 | **09**  | `09. Async Producer–Consumer Pipeline.cu`  | Software pipelining & epilogue | Pipeline bubbles and load/compute serialization  |
 | **10**  | `10. Vectorized Tensor Core Pipeline.cu`   | Vectorized `int4` loads + `float4` epilogue | Memory instruction pressure in Tensor Core pipeline |
@@ -472,7 +474,7 @@ The warp is the actual unit of execution in NVIDIA hardware. Tensor Cores requir
 
 **Hardware units used**
 
-- Warp scheduler (4 warps per SMSP in Hopper)
+- Warp scheduler (active warp scheduling)
 - L1 data cache and shared memory
 - FP32 CUDA cores
 
@@ -543,8 +545,8 @@ Global memory bandwidth: ~320 GB/s    → ~200× too slow
 
 **Hardware units used**
 
-- 4th-Gen Tensor Cores (one per SMSP in Hopper)
-- Global memory (HBM) for fragment loads — the bottleneck
+- 2nd-Gen Tensor Cores (Turing SM75)
+- Global memory (GDDR6) for fragment loads — the bottleneck
 
 ---
 
@@ -599,7 +601,7 @@ v08: global loads unchanged but data is reused BN/16 times from SMEM instead of 
 **Hardware units used**
 
 - Tensor Cores for `mma_sync`
-- Shared memory for tile staging (256 KB configurable, Hopper)
+- Shared memory for tile staging (up to 64 KB configurable per SM on Turing)
 - LD/ST units for cooperative global→shared loads
 
 ---
@@ -677,7 +679,7 @@ The effectiveness depends on whether the compute time for one tile (`BM × BN ×
 
 **Hardware units used**
 
-- `cp.async` (Ampere+) or synchronous loads with explicit double buffering (Turing)
+- Synchronous loads with explicit double buffering (Turing SM75)
 - Tensor Cores for `mma_sync`
 - Shared memory for both operand staging and epilogue layout
 - LD/ST units with 128-bit vector paths for coalesced epilogue writes
