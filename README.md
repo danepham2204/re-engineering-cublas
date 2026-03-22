@@ -427,8 +427,14 @@ Fewer LD/ST instructions mean the warp scheduler has more slots to issue FMA ins
 
 ---
 
+**Them problem comes**:
+This diagram revisits the same memory matrix background, unsynchronized threads (represented by red dots) are scattered randomly.
+
+![Scattered thread](img/scattered_threads.jpg)
+
 ### Version 06: Warp Tiling
 
+![Warp](img/warp.jpg)
 **Core idea**
 
 Group threads into warp-owned output sub-tiles. A warp (32 threads) takes responsibility for a `WARP_M × WARP_N` output region. Within a warp, threads subdivide that region.
@@ -471,7 +477,14 @@ The warp is the actual unit of execution in NVIDIA hardware. Tensor Cores requir
 
 ---
 
+**The problem comes**:
+
+- How can we speed up the matrix multiplication. Currently, 1 warpusing 1 FMA = 1 multiply + 1add = 2FLOP \* 32 = 64 FLOP/instruction
+  whcih is not fast as we think. How about using FP16 with WMMA
+
 ### Version 07: Tensor Core WMMA Baseline
+
+![FP16 tensor core](img/FP16_tensor_core.jpg)
 
 **The hardware operation**
 
