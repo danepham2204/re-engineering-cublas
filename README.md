@@ -45,7 +45,7 @@ Each kernel version isolates one structural change, explains the bottleneck it t
     - [10.3 What's Next](#103-whats-next)
 11. [Experimental Methodology](#11-experimental-methodology)
 12. [Conclusion](#12-conclusion)
-13. [Inspiration and Acknowledgement](#13-inspiration-and-acknowledgement)
+13. [References](#13-references)
 
 ---
 
@@ -684,6 +684,32 @@ v08: global loads unchanged but data is reused BN/16 times from SMEM instead of 
 - Shared memory for tile staging (up to 64 KB configurable per SM on Turing)
 - LD/ST units for cooperative global→shared loads
 
+**Profiling results (ncu, M=N=K=2048)**
+
+| Metric                          | Value      | Interpretation                                  |
+| ------------------------------- | ---------- | ----------------------------------------------- |
+| `sm__warps_active`              | 98.5%      | Extremely high warp occupancy, latency is partially hidden |
+| `dram__bytes_read`              | 662 MB     | ~1.9× reduction in DRAM traffic vs V07 (1.28 GB) |
+| `l1tex__t_bytes...global_op_ld` | 801 MB     | Massive reduction in L1 load demand vs V07 (4.29 GB) |
+| `sm__sass...ffma_pred_on`       | 0 inst     | Expected: 0 because Tensor Cores (`hmma`) are used |
+
+**Arithmetic intensity from hardware counters**
+
+```
+FLOPs = 17.18 GFLOP (FP16/FP32 mixed-precision)
+DRAM  = 0.662 GB
+
+Arithmetic Intensity = 17.18 / 0.662 = 25.9 FLOP/byte
+T4 FP16 TC ridge point = 65000 GFLOP/s / 320 GB/s = 203.1 FLOP/byte
+
+AI improves significantly vs V07, but still memory-bound.
+Actual throughput = 3230 GFLOP/s = 5.0% of FP16 Tensor Core peak.
+```
+
+The arithmetic intensity almost doubled compared to V07 (from `13.4` to `25.9 FLOP/byte`), and DRAM traffic dropped by nearly half (from `1.28 GB` to `662 MB`). This is the direct result of staging the incoming `A` and `B` tiles into Shared Memory first; all warps in the same block column now read from the Shared Memory cache instead of independently hitting the Global Memory bus.
+
+By partially relieving the memory bottleneck, throughput jumped from `1870 GFLOP/s` to `3230 GFLOP/s` (~1.7× speedup). However, the kernel continues to be memory-bound. The 98.5% active warps are largely stalling because the tile loads (`global -> shared`) are synchronous. The warp must wait for the entire tile to load into Shared Memory before calling `wmma::mma_sync`.
+
 ---
 
 ### Version 09: Producer-Consumer Pipeline and Epilogue Staging
@@ -763,6 +789,31 @@ The effectiveness depends on whether the compute time for one tile (`BM × BN ×
 - Tensor Cores for `mma_sync`
 - Shared memory for both operand staging and epilogue layout
 - LD/ST units with 128-bit vector paths for coalesced epilogue writes
+- FP32 CUDA Cores for `alpha * sC + beta * C` epilogue math
+
+**Profiling results (ncu, M=N=K=2048)**
+
+| Metric                          | Value      | Interpretation                                  |
+| ------------------------------- | ---------- | ----------------------------------------------- |
+| `sm__warps_active`              | 98.0%      | Extremely high warp occupancy (similar to V08)  |
+| `dram__bytes_read`              | 745 MB     | Slight increase due to shared memory epilogue C reads |
+| `l1tex__t_bytes...global_op_ld` | 812 MB     | Similar to V08                                  |
+| `sm__sass...ffma_pred_on`       | 4.19M inst | Exactly 2048×2048: Epilogue scalar FP32 FMAs    |
+
+**Arithmetic intensity from hardware counters**
+
+```
+FLOPs = 17.18 GFLOP (FP16/FP32 mixed-precision)
+DRAM  = 0.745 GB
+
+Arithmetic Intensity = 17.18 / 0.745 = 23.0 FLOP/byte
+Actual throughput = 3105 GFLOP/s = 4.8% of FP16 Tensor Core peak.
+```
+
+The performance metrics show that the "Async Pipeline" in this teaching kernel **does not actually overlap** memory and compute. Throughput remains identical to Version 08 (~3100-3200 GFLOP/s).
+Why? Because standard CUDA memory loads (`sA[...] = A[...]`) execute sequentially in the thread. A thread cannot bypass its own stalled global memory load to start WMMA execution; it must wait.
+
+However, you can observe a cool architectural detail: `sm__sass...ffma_pred_on` exactly equals `4,194,304` (which is $M \times N = 2048 \times 2048$). By separating the epilogue from `wmma::store_matrix_sync` into a cooperative Shared Memory write, the kernel manually executed precisely one FFMA scalar instruction per output element to compute `alpha * sC + beta * C`.
 
 ---
 
@@ -837,7 +888,7 @@ B tile:  128 int4 loads,  256 threads → 2 threads per load, 128 threads idle
 
 Fewer active threads per load phase means fewer in-flight memory requests at any moment, which directly reduces the GPU's ability to hide memory latency through request pipelining. The instruction count dropped 8×, but warp-level memory-level parallelism (MLP) dropped with it — and on a bandwidth-bound kernel, MLP matters more than instruction count.
 
-Measured result: `2466 GFLOP/s` vs `2709 GFLOP/s` for version 09 — approximately 9% slower.
+Measured result: `2983 GFLOP/s` vs `3105 GFLOP/s` for version 09 — approximately 4% slower.
 
 **What must change to realize the gain**
 
@@ -862,6 +913,29 @@ A `128×128` tile with `int4` loads fully occupies all 256 threads during every 
 - Shared memory double buffer for both operand staging and epilogue layout
 - Warp scheduler for overlapping producer loads with consumer MMA
 
+**Profiling results (ncu, M=N=K=2048)**
+
+| Metric                          | Value      | Interpretation                                  |
+| ------------------------------- | ---------- | ----------------------------------------------- |
+| `sm__warps_active`              | 98.3%      | Extremely high warp occupancy                   |
+| `dram__bytes_read`              | 464 MB     | Huge reduction! Nearly approaches cuBLAS (276 MB)|
+| `l1tex__t_bytes...global_op_ld` | 780 MB     | Similar to V08 and V09                          |
+| `sm__sass...ffma_pred_on`       | 0 inst     | Because V10 is an incomplete pipeline demo without epilogue |
+
+**Arithmetic intensity from hardware counters**
+
+```
+FLOPs = 17.18 GFLOP (FP16/FP32 mixed-precision)
+DRAM  = 0.464 GB
+
+Arithmetic Intensity = 17.18 / 0.464 = 37.0 FLOP/byte
+Actual throughput = 2984 GFLOP/s = 4.6% of FP16 Tensor Core peak.
+```
+
+The vectorized loads (`int4`) dramatically reduce DRAM traffic down to `464 MB` because cache lines are fetched much more efficiently and redundant fetching is minimized. This drives the Arithmetic Intensity up to `37.0 FLOP/byte` (the highest so far).
+
+Despite the excellent memory efficiency, the overall throughput actually *dropped* slightly (from `3105 GFLOP/s` in V09 down to `2984 GFLOP/s`). As explained above, the root cause is the `32×64` tile constraint: moving to 128-bit loads means only 25% of the 256 threads are actively issuing memory requests for the `A` tile. This severe loss of Memory-Level Parallelism (MLP) prevents the GPU from saturating the memory bus. Mending this requires significantly larger Shared Memory tiles.
+
 ---
 
 ## 9. Performance Results
@@ -875,11 +949,11 @@ Benchmark: matrix dimensions `2048 × 2048 × 2048`. ncu metrics collected with 
 | **03. Register Tiling (1D)**       | 16.164    | 1062.82 | —           | —         | —                | 1.83e-04  | ✅ Pass |
 | **04. Register Tiling (2D)**       | 12.473    | 1377.36 | —           | —         | —                | 1.83e-04  | ✅ Pass |
 | **05. Vectorized Register Tiling** | 5.199     | 3304.42 | —           | —         | —                | 1.83e-04  | ✅ Pass |
-| **06. Warp Tiling**                | 13.326    | 1289.19 | 49.4%       | 543 MB    | 31.6 FLOP/byte   | 1.83e-04  | ✅ Pass |
-| **07. Tensor Cores (WMMA)**        | 7.780     | 2208.25 | —           | —         | —                | 0.00e+00  | ✅ Pass |
-| **08. Tensor Cores SMEM WMMA**     | 7.052     | 2436.32 | —           | —         | —                | 0.00e+00  | ✅ Pass |
-| **09. Async Pipeline WMMA**        | 6.340     | 2709.72 | —           | —         | —                | 0.00e+00  | ✅ Pass |
-| **10. Vectorized TC Pipeline**     | 7.100     | 2466.00 | —           | —         | —                | 0.00e+00  | ✅ Pass |
+| **06. Warp Tiling**                | 10.957    | 1567.92 | 49.5%       | 485 MB    | 35.4 FLOP/byte   | 1.83e-04  | ✅ Pass |
+| **07. Tensor Cores (WMMA)**        | 9.186     | 1870.31 | 95.9%       | 1.28 GB   | 13.4 FLOP/byte   | 0.00e+00  | ✅ Pass |
+| **08. Tensor Cores SMEM WMMA**     | 5.319     | 3229.80 | 98.5%       | 662 MB    | 25.9 FLOP/byte   | 0.00e+00  | ✅ Pass |
+| **09. Async Pipeline WMMA**        | 5.532     | 3105.45 | 98.0%       | 746 MB    | 23.0 FLOP/byte   | 0.00e+00  | ✅ Pass |
+| **10. Vectorized TC Pipeline**     | 5.758     | 2983.52 | 98.3%       | 464 MB    | 37.0 FLOP/byte   | 0.00e+00  | ✅ Pass |
 
 ---
 
@@ -970,6 +1044,11 @@ By tracing this full path from naive global-memory access to asynchronous Tensor
 
 ---
 
-## 13. Inspiration and Acknowledgement
+## 13. References
 
-This work is shaped by performance-engineering writeups that treat GEMM optimization as a sequence of isolated structural changes rather than a single opaque final kernel. In particular, Hamza Elshafie's H100 GEMM optimization study helped frame the methodology: analyze one optimization at a time, identify the bottleneck it targets, and explain the hardware consequences of each change.
+- **Hamza Elshafie's H100 GEMM Optimization**: [H100-GEMM-Optimization](https://github.com/HamzaElshafie/H100-GEMM-Optimization) — Inspiration for the methodology of treating GEMM optimization as a sequence of isolated structural changes.
+- **NVIDIA cuBLAS**: [cuBLAS Library Documentation](https://docs.nvidia.com/cuda/cublas/index.html) — The standard reference for dense linear algebra on NVIDIA GPUs.
+- **NVIDIA Tensor Cores (WMMA)**: [Warp Matrix Multiply Accumulate API](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#wmma) — Official programming guide for the C++ APIs exposing hardware Tensor Cores.
+- **Turing Architecture (T4 GPU)**: [NVIDIA Turing Architecture In-Depth](https://developer.nvidia.com/blog/nvidia-turing-architecture-in-depth/) — Deep dive into SM75, the unified L1/Shared Memory hierarchy, and 2nd-generation Tensor Cores.
+- **Matrix Multiplication & Performance**: [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html) — NVIDIA's guidelines on coalesced memory access, shared memory banking, and execution configuration.
+- **Hardware Metrics**: [Nsight Compute (ncu) CLI User Guide](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html) — Reference for interpreting hardware counters like `sm__warps_active` and `dram__bytes_read`.

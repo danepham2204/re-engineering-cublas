@@ -80,7 +80,6 @@ __global__ void sgemm_tensor_core_pipeline_epilogue(
 
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;
-    const int lane = tid % 32;
 
     const int warp_m = warp_id / BLOCK_WARPS_N;
     const int warp_n = warp_id % BLOCK_WARPS_N;
