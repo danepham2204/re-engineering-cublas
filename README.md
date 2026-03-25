@@ -39,7 +39,7 @@ Each kernel version isolates one structural change, explains the bottleneck it t
    - [Version 10: Vectorized Tensor Core Pipeline](#version-10-vectorized-tensor-core-pipeline)
      - [Why this approach is correct in principle](#why-this-approach-is-correct-in-principle)
      - [Why the measured result is lower than version 09 (tile size constraint)](#why-the-measured-result-is-lower-than-version-09-tile-size-constraint)
-9. [Performance Results](#9-performance-results)
+9. [Benchmark Results](#9-benchmark-results)
 10. [Development Backlog](#10-development-backlog)
     - [10.1 Compilation and the NVCC Story](#101-compilation-and-the-nvcc-story)
     - [10.2 The Memory Wall Problem](#102-the-memory-wall-problem)
@@ -71,7 +71,7 @@ A naive GPU implementation of GEMM fails to exploit the memory and execution hie
 - high load/store instruction overhead
 - register pressure
 - insufficient overlap between memory and compute
-- underutilization of Tensor Cores
+- under utilization of Tensor Cores
 
 This repository investigates how those inefficiencies can be removed systematically through kernel restructuring.
 
@@ -79,7 +79,7 @@ This repository investigates how those inefficiencies can be removed systematica
 
 ## 2. Research Objective
 
-> **How does a CUDA GEMM kernel need to be transformed, stage by stage, to progress from a correctness-oriented baseline to a structured, high-performance GPU matrix multiplication?**
+> **How can a CUDA GEMM kernel be systematically re-engineered, layer by layer, to bridge the gap between a naive implementation and the hardware's theoretical peak performance, and what are the fundamental architectural bottlenecks that dictate each transformation?*
 
 The project aims to:
 
@@ -128,7 +128,7 @@ The 13× gap between our best and cuBLAS is:
 
 **The concrete thesis this project tests:**
 
-> _Reaching the memory-bound limit on T4 with FP16 GEMM requires simultaneously satisfying three conditions: (1) tiles large enough to keep all threads busy during vectorized loads, (2) 128-bit load instructions to saturate the LD/ST pipeline, and (3) a double-buffered pipeline to overlap load and compute within the software constraint of SM75. Kernels v11 is the first to satisfy all three._
+> _Reaching the memory-bound limit on T4 with FP16 GEMM requires simultaneously satisfying three conditions: (1) `128×128` tiles so that `SA_VEC_COUNT = 256 = THREADS_PER_BLOCK` — every thread has exactly one `int4` load assignment per iteration, (2) 128-bit `int4` load instructions to reduce LD/ST pressure by 8×, and (3) a double-buffered pipeline to overlap load and compute within the software constraint of SM75. No kernel in v01–v10 satisfies all three at once. Kernel v11 is the first **designed** to do so — it has not been implemented yet and is the critical next experiment for Phase 1 completion._
 
 ---
 
@@ -981,7 +981,7 @@ Despite the excellent memory efficiency, the overall throughput actually _droppe
 
 ---
 
-## 9. Performance Results
+## 9. Benchmark Results
 
 Benchmark: matrix dimensions `2048 × 2048 × 2048`. ncu metrics collected with `--launch-skip 1 --launch-count 1` on a single steady-state invocation.
 
