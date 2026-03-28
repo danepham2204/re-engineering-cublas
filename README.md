@@ -15,12 +15,10 @@ Each kernel version isolates one structural change, explains the bottleneck it t
 1. [Problem Statement](#1-problem-statement)
 2. [Research Objective](#2-research-objective)
    - [The Two-Phase Goal](#the-two-phase-goal)
-3. [Why GEMM Matters](#3-why-gemm-matters)
-4. [Hardware Context](#4-hardware-context)
-5. [Conceptual Dataflow](#5-conceptual-dataflow)
-6. [Execution Hierarchy](#6-execution-hierarchy)
-7. [Optimization Roadmap](#7-optimization-roadmap)
-8. [Stage-by-Stage Breakdown](#8-stage-by-stage-breakdown)
+3. [Hardware Context](#3-hardware-context)
+   - [Execution Hierarchy](#execution-hierarchy)
+4. [Optimization Roadmap](#4-optimization-roadmap)
+5. [Stage-by-Stage Breakdown](#5-stage-by-stage-breakdown)
    - [Version 01: Naive SGEMM](#version-01-naive-sgemm)
    - [Version 02: Shared-Memory Tiling](#version-02-shared-memory-tiling)
    - [Version 03: Thread-level Strip Tiling (1D tilling)](#version-03-thread-level-strip-tiling-1d-tilling)
@@ -39,14 +37,14 @@ Each kernel version isolates one structural change, explains the bottleneck it t
    - [Version 10: Vectorized Tensor Core Pipeline](#version-10-vectorized-tensor-core-pipeline)
      - [Why this approach is correct in principle](#why-this-approach-is-correct-in-principle)
      - [Why the measured result is lower than version 09 (tile size constraint)](#why-the-measured-result-is-lower-than-version-09-tile-size-constraint)
-9. [Benchmark Results](#9-benchmark-results)
-10. [Development Backlog](#10-development-backlog)
-    - [10.1 Compilation and the NVCC Story](#101-compilation-and-the-nvcc-story)
-    - [10.2 The Memory Wall Problem](#102-the-memory-wall-problem)
-    - [10.3 What's Next](#103-whats-next)
-11. [Experimental Methodology](#11-experimental-methodology)
-12. [Conclusion](#12-conclusion)
-13. [References](#13-references)
+6. [Benchmark Results](#6-benchmark-results)
+7. [Development Backlog](#7-development-backlog)
+   - [7.1 Compilation and the NVCC Story](#71-compilation-and-the-nvcc-story)
+   - [7.2 The Memory Wall Problem](#72-the-memory-wall-problem)
+   - [7.3 What's Next](#73-whats-next)
+8. [Experimental Methodology](#8-experimental-methodology)
+9. [Conclusion](#9-conclusion)
+10. [References](#10-references)
 
 ---
 
@@ -74,6 +72,8 @@ A naive GPU implementation of GEMM fails to exploit the memory and execution hie
 - under utilization of Tensor Cores
 
 This repository investigates how those inefficiencies can be removed systematically through kernel restructuring.
+
+GEMM is the right kernel to study because it exposes the full interaction between thread hierarchy and warp scheduling, global and shared memory bandwidth, register reuse and instruction throughput, and specialized hardware such as Tensor Cores — making every GPU optimization technique directly observable and measurable.
 
 ---
 
@@ -132,20 +132,7 @@ The 13× gap between our best and cuBLAS is:
 
 ---
 
-## 3. Why GEMM Matters
-
-GEMM is foundational in scientific computing, numerical linear algebra, and deep learning. Many higher-level operations reduce to matrix multiplication, making it a core primitive that often determines end-to-end performance.
-
-For GPU performance engineering, GEMM is an ideal case study because it exposes the full interaction between:
-
-- thread hierarchy and warp scheduling
-- global and shared memory bandwidth
-- register reuse and instruction issue throughput
-- specialized hardware such as Tensor Cores
-
----
-
-## 4. Hardware Context
+## 3. Hardware Context
 
 The diagrams below serve as architectural reference throughout the optimization story.
 
@@ -159,33 +146,9 @@ Key notes:
 - All threads in the grid execute the same kernel function.
 - Performance comes from coordinating those threads to match the GPU's memory and execution hierarchy.
 
----
+### Execution Hierarchy
 
-## 5. Conceptual Dataflow
-
-Optimized GEMM progressively transforms the computation from direct global-memory access into a staged, hierarchical pipeline:
-
-```mermaid
-flowchart LR
-    A[Global Memory A/B] --> B[Shared Memory Tiles]
-    B --> C[Register Fragments]
-    C --> D[Accumulator Registers]
-    D --> E[Shared Memory Epilogue]
-    E --> F[Global Memory C]
-```
-
-The optimization sequence improves each transition:
-
-- global memory → shared memory
-- shared memory → registers
-- registers → accumulators
-- accumulators → final output
-
----
-
-## 6. Execution Hierarchy
-
-An optimized GEMM must align with the GPU's execution hierarchy at every level:
+An optimized GEMM must align with the GPU's execution hierarchy at every level. Each optimization stage in this project corresponds to one level of this hierarchy:
 
 ```mermaid
 flowchart TD
@@ -195,11 +158,11 @@ flowchart TD
     D --> E[Tensor Core Fragment]
 ```
 
-Early kernels operate at the block and thread level. Later kernels introduce warp-aware tiling and Tensor Core mapping so that work granularity matches the actual hardware scheduling model.
+Early kernels (v01–v02) operate at the block and thread level. Later kernels (v06–v10) introduce warp-aware tiling and Tensor Core fragment mapping so that work granularity matches the actual hardware scheduling model at every tier.
 
 ---
 
-## 7. Optimization Roadmap
+## 4. Optimization Roadmap
 
 | Version | File                                       | Core Optimization                           | Main Bottleneck Targeted                            |
 | :------ | :----------------------------------------- | :------------------------------------------ | :-------------------------------------------------- |
@@ -216,7 +179,7 @@ Early kernels operate at the block and thread level. Later kernels introduce war
 
 ---
 
-## 8. Stage-by-Stage Breakdown
+## 5. Stage-by-Stage Breakdown
 
 Each version is explained with: the core formula, the thread/block mapping, the memory access pattern, the arithmetic intensity, and the hardware units involved.
 
@@ -1096,7 +1059,7 @@ Despite the excellent memory efficiency, the overall throughput actually _droppe
 
 ---
 
-## 9. Benchmark Results
+## 6. Benchmark Results
 
 Benchmark: matrix dimensions `2048 × 2048 × 2048`. ncu metrics collected with `--launch-skip 1 --launch-count 1` on a single steady-state invocation.
 
@@ -1115,9 +1078,9 @@ Benchmark: matrix dimensions `2048 × 2048 × 2048`. ncu metrics collected with 
 
 ---
 
-## 10. Development Backlog
+## 7. Development Backlog
 
-### 10.1 Compilation and the NVCC Story
+### 7.1 Compilation and the NVCC Story
 
 `nvcc` is not just a compiler. It is a multi-stage compilation driver, and a missing architecture flag can produce silently wrong results that pass compilation and report plausible-looking (but completely fabricated) performance numbers.
 
@@ -1136,7 +1099,7 @@ nvcuda::wmma::load_matrix_sync →  wmma.load.a.sync.aligned.m16n16k16.global.ro
 
 > **Compiler flags are not optimization hints. They are architecture contracts.**
 
-### 10.2 The Memory Wall Problem
+### 7.2 The Memory Wall Problem
 
 After validating all nine kernels against cuBLAS, a deeper question surfaced:
 
@@ -1150,7 +1113,7 @@ This is the classic **memory wall**.
 
 > **Vectorization and larger tiles must go together.**
 
-### 10.3 What's Next
+### 7.3 What's Next
 
 | Kernel | Target Hardware   | Technique                                                                                                       |
 | :----- | :---------------- | :-------------------------------------------------------------------------------------------------------------- |
@@ -1160,7 +1123,7 @@ This is the classic **memory wall**.
 
 ---
 
-## 11. Experimental Methodology
+## 8. Experimental Methodology
 
 All kernels are evaluated under the same protocol:
 
@@ -1171,7 +1134,7 @@ All kernels are evaluated under the same protocol:
 
 ---
 
-## 12. Conclusion
+## 9. Conclusion
 
 High-performance GEMM is not the result of one algorithmic trick. It emerges from a sequence of hardware-aligned structural changes, each one removing the constraint that was limiting the previous version.
 
@@ -1202,7 +1165,7 @@ By tracing this full path from naive global-memory access to asynchronous Tensor
 
 ---
 
-## 13. References
+## 10. References
 
 - **Hamza Elshafie's H100 GEMM Optimization**: [H100-GEMM-Optimization](https://github.com/HamzaElshafie/H100-GEMM-Optimization) — Inspiration for the methodology of treating GEMM optimization as a sequence of isolated structural changes.
 - **NVIDIA cuBLAS**: [cuBLAS Library Documentation](https://docs.nvidia.com/cuda/cublas/index.html) — The standard reference for dense linear algebra on NVIDIA GPUs.
