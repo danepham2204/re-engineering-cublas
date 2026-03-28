@@ -242,65 +242,140 @@ This below diagram shows the concrete mapping for `M=N=K=2048`:
 
 ![Naive SGEMM grid and thread mapping](img/matrix-multiplication.png)
 
-**Grid and block configuration**
+**Grid decomposition**
+
+The diagram above shows how the output matrix `C` of shape `M×K` is partitioned across the GPU. The grid is tiled into blocks of size `B×B` (here `B=32`), so the grid dimensions are:
 
 ```
-blockDim = (32, 32)         → 1024 threads per block
-gridDim  = (CEIL(K/32), CEIL(M/32)) = (64, 64)
-→ 64 × 64 = 4,096 blocks launched, each covering a 32×32 tile of C
+grid_x = ⌈K / B⌉,   grid_y = ⌈M / B⌉
 ```
 
-**Concrete example — block (2, 2), thread (0, 0)**
+For `M=K=2048`, `B=32`: both dimensions yield 64 blocks, giving `64 × 64 = 4,096` blocks in total. Each block is responsible for exactly one `32×32` sub-tile of `C`.
+
+**Thread-to-element mapping**
+
+Within each block, thread `(t_x, t_y)` is assigned to a unique output element. The global row and column indices are:
 
 ```
-Row    in A: blockIdx.y * 32 + threadIdx.y = 2 * 32 + 0 = 64
-Column in B: blockIdx.x * 32 + threadIdx.x = 2 * 32 + 0 = 64
-
-This thread computes C[64][64]:
-  = A[64][0]*B[0][64] + A[64][1]*B[1][64] + ... + A[64][2047]*B[2047][64]
-  → 2048 multiply-accumulate operations, all from global memory
+row = blockIdx.y · B + t_y
+col = blockIdx.x · B + t_x
 ```
 
-**`__restrict__` optimization**
+This is a bijection: every pair `(row, col)` in `C` has exactly one thread responsible for it.
 
-The kernel declares all three pointers with `__restrict__`:
+**What each thread computes**
 
-```cpp
-__global__ void sgemm_coalesced(
-    const float* __restrict__ A,
-    const float* __restrict__ B,
-          float* __restrict__ C, ...)
-```
-
-This tells the compiler that `A`, `B`, and `C` do not alias each other in memory. Without this hint, the compiler must assume any store to `C` could affect the values read through `A` or `B`, which prevents it from reordering or vectorizing loads. With `__restrict__`, the compiler is free to schedule memory instructions more aggressively and reduce stalls.
-
-**Thread mapping**
+Thread `(t_x, t_y)` evaluates a single inner product over the full reduction dimension `K`:
 
 ```
-thread (tx, ty) owns output element C[blockIdx.y * blockDim.y + ty][blockIdx.x * blockDim.x + tx]
+C[row][col] = Σ  A[row][k] · B[k][col],   k = 0 … K−1
 ```
 
-One thread → one output. Every thread walks all `K` steps independently.
+This is `K` multiply-accumulate operations. The thread must read an entire row of `A` and an entire column of `B` — both from global memory, independently of every other thread.
 
-**Memory access pattern**
+**Warps — the unit of execution**
 
-For a single output element:
+An SM does not schedule individual threads. It groups the threads of a block into **warps** of 32 consecutive threads and issues one instruction per warp per clock. Threads within a block are linearised in row-major order, so for a 1D block of size `B²`:
 
-- reads `A[row][0..K-1]` → `K` global loads, not reused by any neighbor
-- reads `B[0..K-1][col]` → `K` global loads, not reused by any neighbor
+```
+warp w  owns threads  { i : 32w ≤ i < 32(w+1) }
+```
 
-Two threads in the same row that compute adjacent columns re-read the same row of `A` from global memory independently.
+For a 2D block `(B, B)` flattened the same way, warp `w` contains the threads whose flat index `i = t_y · B + t_x` satisfies `32w ≤ i < 32(w+1)`. In a `32×32` block this means warp `w` is exactly row `w` of the block — threads `(0,w) … (31,w)`, all sharing the same `t_y` and consecutive `t_x`.
+
+**Memory transaction model**
+
+Global memory (HBM/GDDR) is accessed in aligned chunks of **32 B**, **64 B**, or **128 B** — called *cache lines*. When a warp issues a load, the L1 cache controller collects all 32 addresses and merges those that fall in the same 128-byte sector into a single transaction.
+
+Define the *flat address* that thread `i` in a warp reads as `addr(i)`. The number of 128-byte transactions issued is:
+
+```
+transactions = |{ ⌊addr(i) / 128⌋ : i = 0 … 31 }|
+             = number of distinct 128-byte sectors touched
+```
+
+The efficiency of that warp's load is then:
+
+```
+efficiency = (32 × 4 bytes) / (transactions × 128 bytes)
+           = 128 / (transactions × 128)
+           = 1 / transactions
+```
+
+Best case: all 32 threads hit the same sector → `transactions = 1`, `efficiency = 1`.  
+Worst case: all 32 threads hit different sectors → `transactions = 32`, `efficiency = 1/32`.
+
+**Coalescing analysis for matrix A**
+
+A is stored row-major in memory. Element `A[r][c]` lives at flat address:
+
+```
+addr_A(r, c) = base_A + (r · N + c) · 4   bytes
+```
+
+In warp `w` (which is row `w` of the block), threads share `t_y = w` and carry `t_x = 0 … 31`. At step `k` of the reduction, every thread reads `A[row][k]` — the **same** element, broadcasted. Across the full loop, thread `t_x` reads:
+
+```
+addr_A at step k = base_A + (row · N + k) · 4
+```
+
+This address is **identical** for all 32 threads in the warp (same `row`, same `k`). The hardware broadcasts a single 4-byte load to all 32 threads: **1 transaction regardless of warp width**.
+
+The interesting moment is when 32 threads from the same warp all execute the *same* `k` step simultaneously and their `row` values differ. Consider warp `w` at the first step `k=0`. All 32 threads share `t_y`, so they all share the same `row`. They read the same cell — a broadcast, not a coalesced load. The row dimension never generates a coalescing opportunity here because each thread computes a different `col` independently.
+
+**Coalescing analysis for matrix B**
+
+B is stored row-major. Element `B[r][c]` lives at:
+
+```
+addr_B(r, c) = base_B + (r · K + c) · 4   bytes
+```
+
+Thread `t_x` reads `B[k][col]` at step `k`, where `col = blockIdx.x · B + t_x`. For 32 threads in the same warp (same `t_y`, consecutive `t_x = 0…31`):
+
+```
+addr_B(thread t_x, step k) = base_B + (k · K + blockIdx.x · B + t_x) · 4
+```
+
+The difference between consecutive threads is exactly 4 bytes (stride 1 in `t_x`). All 32 addresses fall in a 128-byte window — **1 transaction** per step, full coalescing.
+
+**Non-coalesced counter-example**
+
+If instead the kernel assigned `t_x` to the row dimension and `t_y` to the column dimension — i.e. if the thread-to-element mapping were:
+
+```
+row = blockIdx.y · B + t_x          ← t_x selects row
+col = blockIdx.x · B + t_y          ← t_y selects col
+```
+
+then reading `A[row][k]` would give:
+
+```
+addr_A(thread t_x, step k) = base_A + ((blockIdx.y · B + t_x) · N + k) · 4
+```
+
+Consecutive threads now differ by `N · 4 = 2048 × 4 = 8192` bytes. Each thread's address falls in a completely different 128-byte sector:
+
+```
+transactions = 32   (one per thread)
+efficiency   = 1/32
+```
+
+Throughput drops by 32×. This is the non-coalesced pattern.
+
+![Coalesced vs non-coalesced global memory access](img/non-coalesced-and-coalesced-compare.png)
+
+The diagram shows both patterns side by side. In the coalesced case (top), 32 thread addresses are contiguous — one 128-byte transaction covers the whole warp. In the non-coalesced case (bottom), 32 thread addresses are spaced `N·4` bytes apart, each touching a separate cache line, forcing 32 transactions for the same 128 bytes of useful data. The useful bandwidth is `1/transactions` of the peak.
 
 **Arithmetic intensity**
 
-```
-FLOPs per output = 2 * K   (K multiplies + K adds)
-Bytes loaded     = 2 * K * 4 bytes  (A row + B column, both float32)
+Each output element requires `2K` floating-point operations (K multiplies + K adds) and loads `2K` float32 values (K from `A`, K from `B`):
 
-Arithmetic intensity = (2K) / (8K) = 0.25 FLOP/byte
+```
+Arithmetic intensity = 2K FLOPs / (2K × 4 bytes) = 0.25 FLOP/byte
 ```
 
-For `K=2048` this is still only `0.25 FLOP/byte`. The T4 needs roughly ~10–15 FLOP/byte as the threshold. This kernel is entirely memory-bound.
+This is far below the roofline crossover point (~10–15 FLOP/byte on a T4). The kernel is entirely memory-bound: the GPU spends almost all of its time waiting for global memory, not computing.
 
 **Hardware units used**
 
