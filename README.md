@@ -1252,7 +1252,7 @@ Benchmark: matrix dimensions `2048 × 2048 × 2048`. ncu metrics collected with 
 | **03. Register Tiling (1D)**       | 16.164    | 1062.82 | —           | —         | —                | 1.83e-04  | ✅ Pass |
 | **04. Register Tiling (2D)**       | 12.473    | 1377.36 | —           | —         | —                | 1.83e-04  | ✅ Pass |
 | **05. Vectorized Register Tiling** | 4.311    | 3985.01 | ~49.3%      | 323 MB   | 682.7 FLOP/byte  | 0.00e+00  | ✅ Pass |
-| **06. Warp Tiling**                | ~4.318    | 3778.87 | ~49.3%      | ~298 MB   | 682.7 FLOP/byte  | 0.00e+00  | ✅ Pass |
+| **06. Warp Tiling**                | 10.957    | 1567.92 | 49.5%       | 485 MB    | 35.4 FLOP/byte   | 1.83e-04  | ✅ Pass |
 | **07. Tensor Cores (WMMA)**        | 9.186     | 1870.31 | 95.9%       | 1.28 GB   | 13.4 FLOP/byte   | 0.00e+00  | ✅ Pass |
 | **08. Tensor Cores SMEM WMMA**     | 5.319     | 3229.80 | 98.5%       | 662 MB    | 25.9 FLOP/byte   | 0.00e+00  | ✅ Pass |
 | **09. Async Pipeline WMMA**        | 5.532     | 3105.45 | 98.0%       | 746 MB    | 23.0 FLOP/byte   | 0.00e+00  | ✅ Pass |
