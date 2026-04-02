@@ -126,7 +126,7 @@ Following standard conventions:
 - `B ∈ ℝ^(K × N)`
 - `C ∈ ℝ^(M × N)`
 
-GEMM is not just an academic exercise — it is the dominant operation in deep learning. Fully-connected layers, attention projections, and convolutions all reduce to matrix multiplication. cuBLAS, the library this project rebuilds, exists because GEMM performance directly determines the speed of model training and inference. For a rigorous mathematical derivation of how the entire training cycle maps to exactly three GEMM calls, see the companion repository: [backprop-is-gemm](https://github.com/danepham2204/backprop-is-gemm).
+GEMM is not just an academic exercise — it is the dominant operation in deep learning. Fully-connected layers, attention projections, and convolutions all reduce to matrix multiplication. cuBLAS, the library this project rebuilds, exists because GEMM performance directly determines the speed of model training and inference. For a rigorous mathematical derivation of how the entire training cycle maps to exactly three GEMM calls, see the companion repository: [Backpropagation-Is-Just-3-GEMM-Calls](https://github.com/danepham2204/Backpropagation-Is-Just-3-GEMM-Calls).
 
 More importantly, GEMM is the right kernel to study because it exposes **the full interaction between every GPU optimization technique simultaneously**: thread hierarchy and warp scheduling, global and shared memory bandwidth, register reuse and instruction throughput, and specialized hardware such as Tensor Cores. Every bottleneck that exists in GPU programming appears in GEMM, making each transformation directly observable and measurable.
 
@@ -1239,4 +1239,4 @@ By tracing this full path from naive global-memory access to asynchronous Tensor
 - **Turing Architecture (T4 GPU)**: [NVIDIA Turing Architecture In-Depth](https://developer.nvidia.com/blog/nvidia-turing-architecture-in-depth/) — Deep dive into SM75, the unified L1/Shared Memory hierarchy, and 2nd-generation Tensor Cores.
 - **Matrix Multiplication & Performance**: [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html) — NVIDIA's guidelines on coalesced memory access, shared memory banking, and execution configuration.
 - **Hardware Metrics**: [Nsight Compute (ncu) CLI User Guide](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html) — Reference for interpreting hardware counters like `sm__warps_active` and `dram__bytes_read`.
-- **Backprop is GEMM**: [backprop-is-gemm](https://github.com/danepham2204/backprop-is-gemm) — Companion repository demonstrating the mathematical bridge between backpropagation algorithms and the cuBLAS GEMM kernels built in this project.
+- **Backprop is GEMM**: [Backpropagation-Is-Just-3-GEMM-Calls](https://github.com/danepham2204/Backpropagation-Is-Just-3-GEMM-Calls) — Companion repository demonstrating the mathematical bridge between backpropagation algorithms and the cuBLAS GEMM kernels built in this project.
