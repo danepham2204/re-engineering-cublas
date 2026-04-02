@@ -1255,7 +1255,7 @@ Benchmark: matrix dimensions `2048 × 2048 × 2048`. ncu metrics collected with 
 | **06. Warp Tiling**                | 36.370    | 3778.87 | 49.29%      | 2.39 GB   | 57.5 FLOP/byte   | 0.00e+00  | ✅ Pass |
 | **07. Tensor Cores (WMMA)**        | 24.030    | 5719.42 | 24.94%      | 2.04 GB   | 67.3 FLOP/byte   | 0.00e+00  | ✅ Pass |
 | **08. Tensor Cores SMEM WMMA**     | 19.299    | 7121.51 | 25.00%      | 1.33 GB   | 130.8 FLOP/byte  | 0.00e+00  | ✅ Pass |
-| **09. Async Pipeline WMMA**        | 5.532     | 3105.45 | 98.0%       | 746 MB    | 23.0 FLOP/byte   | 0.00e+00  | ✅ Pass |
+| **09. Async Pipeline WMMA**        | 19.552    | 7029.43 | 25.00%      | 1.39 GB   | 129.3 FLOP/byte  | 0.00e+00  | ✅ Pass |
 | **10. Vectorized TC Pipeline**     | 5.758     | 2983.52 | 98.3%       | 464 MB    | 37.0 FLOP/byte   | 0.00e+00  | ✅ Pass |
 
 ---

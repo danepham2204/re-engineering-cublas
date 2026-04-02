@@ -21,8 +21,8 @@
 
 using namespace nvcuda;
 
-constexpr int BM = 128;
-constexpr int BN = 128;
+constexpr int BM = 64;
+constexpr int BN = 64;
 constexpr int BK = 32;
 
 constexpr int WMMA_M = 16;
@@ -30,15 +30,15 @@ constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
 
 constexpr int WM = 32;
-constexpr int WN = 64;
+constexpr int WN = 32;
 
-constexpr int WARPS_M = BM / WM;            // 4
+constexpr int WARPS_M = BM / WM;            // 2
 constexpr int WARPS_N = BN / WN;            // 2
-constexpr int WARPS_PER_BLOCK = WARPS_M * WARPS_N; // 8
-constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32; // 256
+constexpr int WARPS_PER_BLOCK = WARPS_M * WARPS_N; // 4
+constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * 32; // 128
 
 constexpr int FRAGS_M = WM / WMMA_M;        // 2
-constexpr int FRAGS_N = WN / WMMA_N;        // 4
+constexpr int FRAGS_N = WN / WMMA_N;        // 2
 
 constexpr int PAD = 8; // Avoid SMEM bank conflicts during load_matrix_sync
 
