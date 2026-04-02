@@ -1,4 +1,4 @@
-# Rebuilding cuBLAS: Optimizing GEMM on NVIDIA T4 to Achieve Peak Performance
+# Re-engineering cuBLAS: Optimizing GEMM on NVIDIA T4 to Achieve Peak Performance
 
 A correct GEMM kernel is easy to write. A fast one is not. This repository traces the systematic optimization of GEMM on an NVIDIA T4 GPU — closing the gap from a naive `~465 GFLOP/s` up to the hardware's FP32 ceiling of `~3,985 GFLOP/s` (90% of real cuBLAS performance where theoretical is 8.1 TFLOP/s), and eventually utilizing Tensor Cores to accelerate mixed-precision FP16/FP32 compute to `~17,058 GFLOP/s` (achieving ~26.2% of the hardware's `65 TFLOP/s` peak) — through a repeated diagnostic loop:
 
