@@ -2,7 +2,7 @@
 
 A correct GEMM kernel is easy to write. A fast one is not. This repository traces the systematic optimization of GEMM on NVIDIA GPUs—bridging the massive gap from a naive memory-bound implementation (`~465 GFLOP/s`) up to the hardware's theoretical compute ceilings. On our evaluation platform (NVIDIA T4), this pipeline closes the FP32 optimization path at `~3,985 GFLOP/s` (90% of real cuBLAS FP32 performance), before utilizing Tensor Cores to accelerate mixed-precision FP16/FP32 compute up to `~17,058 GFLOP/s` at the ldmatrix + single-buffer version(achieving ~26.2% of the hardware's `65 TFLOP/s` peak). While the exact throughput numbers reflect the Turing architecture, the structural constraints explored—LD/ST instruction pressure, shared memory bank conflicts, and sub-optimal SM occupancy—are universal across modern Tensor Core generations.
 
-![NVIDIA Turing Architecture Reference](img/T4_Nvidia_architecture.png)
+![Perofmrnace odyssey](img/perofrmance_odyssey.png)
 
 Throughout this project, we iterate through a rigorous diagnostic loop:
 
