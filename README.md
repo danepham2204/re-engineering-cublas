@@ -2,6 +2,8 @@
 
 A correct GEMM kernel is easy to write. A fast one is not. This repository traces the systematic optimization of GEMM on NVIDIA GPUs—bridging the massive gap from a naive memory-bound implementation (`~465 GFLOP/s`) up to the hardware's theoretical compute ceilings. On our evaluation platform (NVIDIA T4), this pipeline closes the FP32 optimization path at `~3,985 GFLOP/s` (90% of real cuBLAS FP32 performance), before utilizing Tensor Cores to accelerate mixed-precision FP16/FP32 compute up to `~17,058 GFLOP/s` at the ldmatrix + single-buffer version(achieving ~26.2% of the hardware's `65 TFLOP/s` peak). While the exact throughput numbers reflect the Turing architecture, the structural constraints explored—LD/ST instruction pressure, shared memory bank conflicts, and sub-optimal SM occupancy—are universal across modern Tensor Core generations.
 
+![NVIDIA Turing Architecture Reference](img/T4_Nvidia_architecture.png)
+
 Throughout this project, we iterate through a rigorous diagnostic loop:
 
 **profile → identify hardware bottleneck → architect structural intervention → re-measure**
@@ -148,17 +150,18 @@ This repository investigates how those inefficiencies can be removed systematica
 
 This research empirically investigates the microarchitectural bottlenecks that bound General Matrix Multiplication (GEMM) performance on modern GPUs, specifically analyzing the transition from scalar SIMT execution to mixed-precision Tensor Core pipelines.
 
-While the mathematical definition of GEMM is trivial, achieving hardware-saturating performance requires mapping the algorithm to a highly constrained execution hierarchy. A naive implementation leaves over 95% of theoretical compute capacity unutilized due to severe starvation at the memory wall. 
+While the mathematical definition of GEMM is trivial, achieving hardware-saturating performance requires mapping the algorithm to a highly constrained execution hierarchy. A naive implementation leaves over 95% of theoretical compute capacity unutilized due to severe starvation at the memory wall.
 
 The primary objective of this work is to characterize the explicit structural transformations necessary to saturate the Global Memory Bandwidth ceiling, and subsequently, how to cross the arithmetic intensity ridge point to become compute-bound. Rather than presenting a simple engineering worklog, this project isolates and models individual hardware constraints to provide a rigorous architectural analysis of GPU performance limitations.
 
 Specifically, the study seeks to:
+
 1. **Model the Memory Hierarchy:** Quantify the exact arithmetic intensity gains achieved through hierarchical memory structures (Registers, Shared Memory, L1/L2 caches) and demonstrate the spatial/temporal locality required to hit the bandwidth roofline.
 2. **Characterize Instruction-Level Constraints:** Analyze how low-level vectorization strategies (e.g., 128-bit `float4`/`int4` loads) alleviate warp scheduler starvation by reducing LD/ST instruction pressure, converting memory-bound stall cycles into useful FMA issue slots.
 3. **Analyze Tensor Core Resource Scaling:** Evaluate the non-linear performance scaling when mapping cooperative warp-level operations (WMMA) to hierarchical thread blocks. This involves formalizing the critical trade-offs between shared memory footprint, data reuse dimensions, and Streaming Multiprocessor (SM) occupancy walls.
 4. **Evaluate Zero-Overhead Memory Operations:** Investigate the impact of advanced PTX instructions (e.g., `ldmatrix`) in eliminating Shared Memory to Tensor Core register staging overheads.
 
-### The Roofline Progression Strategy
+### The Two-phase goal
 
 The optimization trajectory is structured conceptually around two physical limits defined by the theoretical Roofline Model for the evaluation architecture (NVIDIA T4).
 
@@ -196,7 +199,7 @@ Theoretical Bounds (SM75):
 
 ## 3. Hardware Context
 
-The diagrams below serve as architectural reference throughout the optimization story.
+The diagram below serve as architectural reference throughout the optimization story.
 
 ![NVIDIA Turing Architecture Reference](img/T4_Nvidia_architecture.png)
 
@@ -1240,7 +1243,7 @@ Despite the excellent memory efficiency, the overall throughput actually _droppe
 
 ### Version 11: ldmatrix + Single-Buffer 128×128 Tiles
 
-**Core idea: two occupancy unlocks in one kernel**
+Core idea: two occupancy unlocks in one kernel
 
 Version 10 solved the instruction-count problem but left two structural inefficiencies intact: (1) its double-buffer shared memory footprint (`37 KB`) limited occupancy to one block per SM on T4 (which has `64 KB` shared memory per SM), and (2) it used `wmma::load_matrix_sync` for the SMEM→register path — a software-implemented scatter that visits each element individually. Version 11 attacks both at once.
 
@@ -1333,11 +1336,11 @@ Every thread issues exactly two `int4` loads for each tile — both A and B — 
 
 **Profiling results (ncu, M=N=K=4096)**
 
-| Metric             | Value   | Interpretation                                               |
-| ------------------ | ------- | ------------------------------------------------------------ |
-| `sm__warps_active` | 49.4%   | Doubled from v10 (25%) — 2 blocks per SM confirmed           |
-| Throughput         | 17 TFLOP/s | +37% vs v10 (12.38 TFLOP/s), ~26% of T4 FP16 peak        |
-| Max Error          | 0.00e+00 | Correct after ldmatrix address fix                          |
+| Metric             | Value      | Interpretation                                     |
+| ------------------ | ---------- | -------------------------------------------------- |
+| `sm__warps_active` | 49.4%      | Doubled from v10 (25%) — 2 blocks per SM confirmed |
+| Throughput         | 17 TFLOP/s | +37% vs v10 (12.38 TFLOP/s), ~26% of T4 FP16 peak  |
+| Max Error          | 0.00e+00   | Correct after ldmatrix address fix                 |
 
 The occupancy doubling from 25% → 49.4% translates directly into a +37% throughput gain over v10. The 128×128 tile ensures full MLP; `ldmatrix` eliminates the SMEM→register scatter overhead; and the single buffer keeps two warp groups simultaneously in flight on each SM.
 
@@ -1347,19 +1350,19 @@ The occupancy doubling from 25% → 49.4% translates directly into a +37% throug
 
 Benchmark: matrix dimensions `M = N = K` vary by kernel size indicated below. `ncu` metrics collected with `--launch-skip 1 --launch-count 1` on a single steady-state invocation.
 
-| Kernel                             | Size | Time (ms) | GFLOP/s   | Warp Active | DRAM Read  | Max Error | Status  |
-| :--------------------------------- | :--- | :-------- | :-------- | :---------- | :--------- | :-------- | :------ |
-| **01. Naive SGEMM**                | 2048 | 36.896    | 465.63    | —           | —          | 1.83e-04  | ✅ Pass |
-| **02. Shared Memory Tiling**       | 2048 | 20.195    | 850.68    | —           | —          | 1.83e-04  | ✅ Pass |
-| **03. Register Tiling (1D)**       | 2048 | 16.164    | 1062.82   | —           | —          | 1.83e-04  | ✅ Pass |
-| **04. Register Tiling (2D)**       | 2048 | 12.473    | 1377.36   | —           | —          | 1.83e-04  | ✅ Pass |
-| **05. Vectorized Register Tiling** | 2048 | 4.311     | 3985.01   | ~49.3%      | 323 MB     | 0.00e+00  | ✅ Pass |
-| **06. Warp Tiling**                | 2048 | 36.370    | 3778.87   | 49.29%      | 2.39 GB    | 0.00e+00  | ✅ Pass |
-| **07. Tensor Cores (WMMA)**        | 2048 | 24.030    | 5719.42   | 24.94%      | 2.04 GB    | 0.00e+00  | ✅ Pass |
-| **08. Tensor Cores SMEM WMMA**     | 2048 | 19.299    | 7121.51   | 25.00%      | 1.33 GB    | 0.00e+00  | ✅ Pass |
-| **09. Async Pipeline WMMA**        | 2048 | 19.552    | 7029.43   | 25.00%      | 1.39 GB    | 0.00e+00  | ✅ Pass |
-| **10. Vectorized TC Pipeline**     | 2048 | 11.101    | 12380.34  | 24.99%      | 1.14 GB    | 0.00e+00  | ✅ Pass |
-| **11. Ldmatrix TC**                | 4096 | 8.057     | 17058.90  | 49.40%      | 617.95 MB  | 0.00e+00  | ✅ Pass |
+| Kernel                             | Size | Time (ms) | GFLOP/s  | Warp Active | DRAM Read | Max Error | Status  |
+| :--------------------------------- | :--- | :-------- | :------- | :---------- | :-------- | :-------- | :------ |
+| **01. Naive SGEMM**                | 2048 | 36.896    | 465.63   | —           | —         | 1.83e-04  | ✅ Pass |
+| **02. Shared Memory Tiling**       | 2048 | 20.195    | 850.68   | —           | —         | 1.83e-04  | ✅ Pass |
+| **03. Register Tiling (1D)**       | 2048 | 16.164    | 1062.82  | —           | —         | 1.83e-04  | ✅ Pass |
+| **04. Register Tiling (2D)**       | 2048 | 12.473    | 1377.36  | —           | —         | 1.83e-04  | ✅ Pass |
+| **05. Vectorized Register Tiling** | 2048 | 4.311     | 3985.01  | ~49.3%      | 323 MB    | 0.00e+00  | ✅ Pass |
+| **06. Warp Tiling**                | 2048 | 36.370    | 3778.87  | 49.29%      | 2.39 GB   | 0.00e+00  | ✅ Pass |
+| **07. Tensor Cores (WMMA)**        | 2048 | 24.030    | 5719.42  | 24.94%      | 2.04 GB   | 0.00e+00  | ✅ Pass |
+| **08. Tensor Cores SMEM WMMA**     | 2048 | 19.299    | 7121.51  | 25.00%      | 1.33 GB   | 0.00e+00  | ✅ Pass |
+| **09. Async Pipeline WMMA**        | 2048 | 19.552    | 7029.43  | 25.00%      | 1.39 GB   | 0.00e+00  | ✅ Pass |
+| **10. Vectorized TC Pipeline**     | 2048 | 11.101    | 12380.34 | 24.99%      | 1.14 GB   | 0.00e+00  | ✅ Pass |
+| **11. Ldmatrix TC**                | 4096 | 8.057     | 17058.90 | 49.40%      | 617.95 MB | 0.00e+00  | ✅ Pass |
 
 ---
 
@@ -1402,7 +1405,7 @@ This is the classic **memory wall**.
 
 | Kernel | Target Hardware   | Technique                                                                                                       |
 | :----- | :---------------- | :-------------------------------------------------------------------------------------------------------------- |
-| **11** | Turing (T4, SM75) | `128×128` tiles + `ldmatrix` + single buffer — ✅ implemented, 17 TFLOP/s, Warp Active 49.4%                   |
+| **11** | Turing (T4, SM75) | `128×128` tiles + `ldmatrix` + single buffer — ✅ implemented, 17 TFLOP/s, Warp Active 49.4%                    |
 | **12** | Ampere+ (SM80)    | `cp.async` pipeline — hardware-async Global→Shared, warp never stalls on a load                                 |
 | **13** | Hopper (SM90)     | `TMA + WGMMA` — dedicated DMA engine and 4-warp cooperative MMA, foundation of modern FlashAttention and cuBLAS |
 
