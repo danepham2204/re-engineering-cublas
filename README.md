@@ -1122,6 +1122,8 @@ However, you can observe a cool architectural detail: `sm__sass...ffma_pred_on` 
 
 ### Version 10: Vectorized Tensor Core Pipeline
 
+![Vectorized Tensor Core Pipeline](img/v10.png)
+
 **Core idea: reduce memory instruction count with 128-bit loads**
 
 Kernels 07–09 exposed a structural problem: Tensor Cores finish a `16×16×16` MMA in 1–2 clock cycles, then the entire warp stalls waiting for the next tile to arrive from global memory. The root cause is scalar `__half` loads — each load moves 16 bits, so filling a `32×16` A-tile requires 512 separate load instructions per warp. Version 10 replaces every scalar `__half` load with an `int4` load (128 bits = 8 `__half` per instruction), reducing load instruction count by 8×.
@@ -1242,6 +1244,8 @@ Despite the excellent memory efficiency, the overall throughput actually _droppe
 ---
 
 ### Version 11: ldmatrix + Single-Buffer 128×128 Tiles
+
+![Ldmatrix and Single-Buffer](img/v11.png)
 
 Core idea: two occupancy unlocks in one kernel
 
